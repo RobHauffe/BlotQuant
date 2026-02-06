@@ -82,4 +82,4 @@ Get-FileHash -Path "BlotQuant.exe" -Algorithm SHA256
 
 ## License
 
-This project is available for academic use.
+This project is available for academic use under an MIT licence.
