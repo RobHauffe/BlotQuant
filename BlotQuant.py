@@ -614,6 +614,12 @@ class BlotQuant(QMainWindow):
         website_label.setOpenExternalLinks(True)
         info_layout.addRow("Website:", website_label)
         
+        # License Info
+        license_label = QLabel("Intended for academic use under the MIT License.")
+        license_label.setWordWrap(True)
+        license_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        info_layout.addRow("License:", license_label)
+        
         cred_layout.addLayout(info_layout)
         
         desc_label = QLabel("\nAutomated Western Blot densitometry for\nprecise protein quantification and normalization.")
