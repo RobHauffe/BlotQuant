@@ -12,7 +12,10 @@ BlotQuant is a Python-based application designed for the analysis of Western Blo
     - **Interactive ROI:** Draw and resize regions of interest around protein bands.
     - **Dynamic Separators:** Automatically split ROIs into lanes based on replicate count.
     - **Manual Adjustment:** Drag separators to precisely align with band positions.
+    - **Intensity Profile View:** Real-time vertical profile plot to validate signal peaks and background levels.
 - **Rotation Alignment:** Interactive slider to rotate blots for perfect vertical alignment.
+- **Advanced Background Subtraction:** Lane-specific median calculation to address gradient backgrounds.
+- **Group Management:** Editable history dropdown for group names to streamline analysis of multiple blots.
 - **Normalization:** Automatically normalize target proteins against loading controls (e.g., Actin, GAPDH).
 - **Data Export:** Export comprehensive results to Excel or open data directly in GraphPad Prism.
 - **Visual Feedback:** Real-time overlay of selected regions and lane dividers.
@@ -32,17 +35,18 @@ Based on the defined **Replicate Count**, the ROI is divided into equal lanes. F
 
 ### 4. Quantification
 Once the lanes are defined, individual band intensities are calculated:
-- **Background Subtraction:** A local background value is determined using the **Median Intensity** of the ROI.
-- **Integrated Density:** For each lane, the software calculates the sum of `(Pixel Intensity - Background)` for all pixels above a dynamic threshold (Background + 0.5 * Standard Deviation). This ensures that only the actual protein signal is counted, while noise and background are excluded.
-- **Inversion:** Supports "Invert Signal" for blots where bands are darker than the background (e.g., Ponceau S or Coomassie staining).
+- **Lane-Specific Background Subtraction:** Unlike global subtraction, BlotQuant calculates a unique **Median Intensity** for each lane within its specific boundaries. This is crucial for blots with background gradients (e.g., darker on one side), ensuring that a "smear" on one side doesn't artificially lower values on the other.
+- **Integrated Density:** For each lane, the software calculates the sum of `(Pixel Intensity - Background)` for all pixels above a dynamic threshold (Background + 0.2 * Standard Deviation). This sensitivity adjustment ensures accurate capture of faint bands while excluding noise.
+- **Scientific Validation:** The **Intensity Profile** tool allows researchers to visualize the mean pixel intensity across the ROI width. This "peak" view (with separator lines) ensures that background subtraction isn't clipping the protein signal.
+- **Inversion:** Automatically handles blots where bands are darker than the background (e.g., Ponceau S or Coomassie staining) by inverting pixel values for quantification.
 
 ### 5. Normalization and Statistics
 - **Normalization:** Target protein intensities are divided by their respective loading control intensities from the same lane.
-- **Statistics:** Calculates average fold change, standard error of the mean (SEM), and performs a Student's t-test (unpaired) to determine statistical significance between Control and Treatment groups.
+- **Statistics:** Calculates average fold change, standard error of the mean (SEM), and performs a Welch's t-test (unpaired) to determine statistical significance between Control and Treatment groups.
 
 ## Citation
 
-Users are requested to cite **Hauffe et al. 2026 (Placeholder, i will update this once the paper is published)** when using BlotQuant.
+Users are requested to cite **Hauffe et al. 2026 (In submission)** when using BlotQuant.
 
 ## License
 This project is licensed under the MIT License – see the LICENSE file for details.
@@ -71,9 +75,9 @@ To build the standalone executable from source, follow these steps:
    pyinstaller --noconfirm --onefile --windowed --icon "Blot.ico" --add-data "Blot.ico;." --name "BlotQuant" main.py
    ```
 
-## Current Build Details (2026-02-06)
-- **Version:** 1.0
-- **SHA-256 Checksum:** `65F747E02197243D1111656A8CC25F4C193ABE3077BFA86B491F6098293A24F6`
+## Current Build Details (2026-02-11)
+- **Version:** 1.1.2
+- **SHA-256 Checksum:** `8c8bd76ca30d8fee2b132ee50aaa1cdce74f27b351ec4b1e8dd0419cc09d128e`
 
 To verify the integrity of your `BlotQuant.exe`, you can run the following command in PowerShell:
 ```powershell
@@ -82,4 +86,4 @@ Get-FileHash -Path "BlotQuant.exe" -Algorithm SHA256
 
 ## License
 
-This project is available for academic use under an MIT licence.
+This project is available for academic use.
