@@ -244,7 +244,7 @@ class BlotQuant(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BlotQuant v1.1.0")
+        self.setWindowTitle("BlotQuant v1.1.2")
         self.resize(1600, 800)
         
         # Set Window Icon
