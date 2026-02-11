@@ -5,20 +5,60 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from matplotlib import pyplot as plt
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from scipy import stats
 import warnings
 from datetime import datetime
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QPushButton, QLabel, QFrame, QSplitter, QComboBox, QLineEdit,
-    QRadioButton, QSpinBox, QCheckBox, QGroupBox, QGraphicsView,
-    QGraphicsScene, QGraphicsRectItem, QGraphicsLineItem, QTreeWidget,
-    QTreeWidgetItem, QMessageBox, QFileDialog, QSlider, QDialog,
-    QTabWidget, QFormLayout, QButtonGroup, QMenu
+    QGridLayout, QPushButton, QLabel, QFrame, QSplitter, QComboBox, 
+    QLineEdit, QRadioButton, QSpinBox, QCheckBox, QGroupBox, 
+    QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsLineItem, 
+    QTreeWidget, QTreeWidgetItem, QMessageBox, QFileDialog, QSlider, 
+    QDialog, QTabWidget, QFormLayout, QButtonGroup, QMenu
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QMimeData
 from PySide6.QtGui import QPixmap, QImage, QPen, QColor, QPainter, QIcon, QFont
+
+class ProfileDialog(QDialog):
+    def __init__(self, roi_data, separators, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Lane Intensity Profile")
+        self.resize(600, 400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Create figure and canvas
+        self.figure = Figure(figsize=(6, 4), dpi=100)
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas)
+        
+        self.plot_profile(roi_data, separators)
+        
+    def plot_profile(self, roi_data, separators):
+        # Invert to make bands peaks
+        roi_data = cv2.bitwise_not(roi_data)
+        
+        # Calculate vertical profile (mean across width)
+        # Note: We want to see peaks across the width of the ROI
+        # so we average along the height (axis=0)
+        profile = np.mean(roi_data, axis=0)
+        
+        ax = self.figure.add_subplot(111)
+        ax.plot(profile, color='#3498db', linewidth=2)
+        ax.set_title("Intensity Profile (Across ROI Width)")
+        ax.set_xlabel("Pixel Position (X)")
+        ax.set_ylabel("Mean Intensity")
+        
+        # Add separator lines
+        for sep in separators:
+            ax.axvline(x=sep, color='#e74c3c', linestyle='--', alpha=0.7)
+            
+        ax.grid(True, alpha=0.3)
+        self.figure.tight_layout()
+        self.canvas.draw()
 
 class AnalysisCanvas(QGraphicsView):
     roi_selected = Signal(QRectF)
@@ -204,7 +244,7 @@ class BlotQuant(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BlotQuant v1.0")
+        self.setWindowTitle("BlotQuant v1.1.0")
         self.resize(1600, 800)
         
         # Set Window Icon
@@ -215,8 +255,8 @@ class BlotQuant(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
-        self.version = "1.0"
-        self.creation_date = "2026-02-06"
+        self.version = "1.1.0"
+        self.creation_date = "2026-02-11"
         self.author = "Dr. Robert Hauffe"
         self.affiliation = "Molecular and Experimental Nutritional Medicine, University of Potsdam, Germany"
         
@@ -228,6 +268,7 @@ class BlotQuant(QMainWindow):
         self.current_roi_rect = None
         self.separators = []
         self.excluded_samples = {} # {group_name: [list of excluded indices]}
+        self.group_history = [] # For dropdown selection
         
         # Analysis Data
         self.analysis_history = [] # List of {'type': 'Loading Control'|'Target', 'group': str, 'detail': str, 'name': str, 'intensities': list}
@@ -280,13 +321,17 @@ class BlotQuant(QMainWindow):
         
         # Analysis Settings
         settings_group = QGroupBox("Analysis Settings")
+        settings_group.setMinimumWidth(850)  # Widen to ensure everything fits
         settings_layout = QVBoxLayout(settings_group)
+        settings_layout.setAlignment(Qt.AlignLeft)  # Left align internal layout
         
         # Add Experiment and Help Button to Group Box Header Area
         header_with_help = QHBoxLayout()
+        header_with_help.setAlignment(Qt.AlignLeft)
         header_with_help.addWidget(QLabel("Experiment:"))
         self.experiment_input = QLineEdit()
         self.experiment_input.setPlaceholderText("e.g. Insulin Stimulation #1")
+        self.experiment_input.setFixedWidth(300)  # Slightly wider
         header_with_help.addWidget(self.experiment_input)
         
         header_with_help.addSpacing(20)
@@ -311,69 +356,84 @@ class BlotQuant(QMainWindow):
         header_with_help.addWidget(help_btn)
         settings_layout.addLayout(header_with_help)
         
-        # Mode Group
-        mode_top_layout = QHBoxLayout()
-        mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("Type:"))
+        # Grid layout for Type and Group settings to ensure alignment
+        grid_settings = QGridLayout()
+        grid_settings.setAlignment(Qt.AlignLeft)
+        grid_settings.setHorizontalSpacing(15)
+        grid_settings.setColumnStretch(5, 1) # Add stretch to the end
         
+        # Row 1: Mode (Type)
+        grid_settings.addWidget(QLabel("Type:"), 0, 0)
         self.mode_group = QButtonGroup(self)
         self.mode_control = QRadioButton("Loading Control")
         self.mode_target = QRadioButton("Target")
         self.mode_control.setChecked(True)
         self.mode_group.addButton(self.mode_control)
         self.mode_group.addButton(self.mode_target)
+        grid_settings.addWidget(self.mode_control, 0, 1)
+        grid_settings.addWidget(self.mode_target, 0, 2)
         
-        mode_layout.addWidget(self.mode_control)
-        mode_layout.addWidget(self.mode_target)
-        mode_top_layout.addLayout(mode_layout)
-        
-        mode_top_layout.addSpacing(20)
-        mode_top_layout.addWidget(QLabel("Protein Name:"))
+        grid_settings.addWidget(QLabel("Protein Name:"), 0, 3)
         self.protein_name_input = QLineEdit()
         self.protein_name_input.setPlaceholderText("e.g. pAKT, Ponceau, etc.")
-        mode_top_layout.addWidget(self.protein_name_input)
-        settings_layout.addLayout(mode_top_layout)
+        self.protein_name_input.setFixedWidth(200)
+        grid_settings.addWidget(self.protein_name_input, 0, 4)
         
-        # Group Group
-        group_top_layout = QHBoxLayout()
-        group_layout = QHBoxLayout()
-        group_layout.addWidget(QLabel("Group:"))
-        
+        # Row 2: Group
+        grid_settings.addWidget(QLabel("Group:"), 1, 0)
         self.analysis_group_group = QButtonGroup(self)
         self.group_ctrl = QRadioButton("Control")
         self.group_treat = QRadioButton("Treatment")
         self.group_ctrl.setChecked(True)
         self.analysis_group_group.addButton(self.group_ctrl)
         self.analysis_group_group.addButton(self.group_treat)
+        grid_settings.addWidget(self.group_ctrl, 1, 1)
+        grid_settings.addWidget(self.group_treat, 1, 2)
         
-        group_layout.addWidget(self.group_ctrl)
-        group_layout.addWidget(self.group_treat)
-        group_top_layout.addLayout(group_layout)
-        
-        group_top_layout.addSpacing(20)
-        group_top_layout.addWidget(QLabel("Group Name:"))
-        self.treatment_detail_input = QLineEdit()
+        grid_settings.addWidget(QLabel("Group Name:"), 1, 3)
+        self.treatment_detail_input = QComboBox()
+        self.treatment_detail_input.setEditable(True)
         self.treatment_detail_input.setPlaceholderText("e.g. Ctrl, Insulin 10nM, etc.")
-        group_top_layout.addWidget(self.treatment_detail_input)
-        settings_layout.addLayout(group_top_layout)
+        self.treatment_detail_input.lineEdit().setPlaceholderText("e.g. Ctrl, Insulin 10nM, etc.")
+        self.treatment_detail_input.setFixedWidth(200)
+        grid_settings.addWidget(self.treatment_detail_input, 1, 4)
         
-        reps_layout = QHBoxLayout()
-        reps_layout.addWidget(QLabel("Replicates:"))
+        # Row 3: Replicates & Start Lane
+        grid_settings.addWidget(QLabel("Replicates:"), 2, 0)
         self.reps_spin = QSpinBox()
         self.reps_spin.setRange(1, 20)
         self.reps_spin.setValue(6)
-        reps_layout.addWidget(self.reps_spin)
+        self.reps_spin.setMinimumWidth(60) # Increased width for visibility
+        grid_settings.addWidget(self.reps_spin, 2, 1)
+        
         self.equal_n_check = QCheckBox("Equal N")
-        reps_layout.addWidget(self.equal_n_check)
+        grid_settings.addWidget(self.equal_n_check, 2, 2)
+        
+        grid_settings.addWidget(QLabel("Start Lane:"), 2, 3)
+        self.start_idx_spin = QSpinBox()
+        self.start_idx_spin.setRange(1, 20)
+        self.start_idx_spin.setValue(1)
+        self.start_idx_spin.setMinimumWidth(60) # Increased width for visibility
+        grid_settings.addWidget(self.start_idx_spin, 2, 4)
+        
+        settings_layout.addLayout(grid_settings)
+        
+        # Options Row
+        options_layout = QHBoxLayout()
+        options_layout.setAlignment(Qt.AlignLeft)
         self.lock_roi_check = QCheckBox("Lock ROI Size")
         self.lock_roi_check.setToolTip("Forces new ROI to match the dimensions of the previous selection")
-        reps_layout.addWidget(self.lock_roi_check)
+        options_layout.addWidget(self.lock_roi_check)
+        
+        options_layout.addSpacing(15)
         self.ttest_check = QCheckBox("Perform Welch's Test")
         self.ttest_check.setChecked(True)
-        reps_layout.addWidget(self.ttest_check)
-        settings_layout.addLayout(reps_layout)
+        options_layout.addWidget(self.ttest_check)
+        options_layout.addStretch()
+        settings_layout.addLayout(options_layout)
         
         mgmt_layout.addWidget(settings_group)
+        mgmt_layout.addStretch() # Push the group to the left
         left_layout.addLayout(mgmt_layout)
         
         # Rotation Control
@@ -404,6 +464,14 @@ class BlotQuant(QMainWindow):
         apply_btn.setStyleSheet("background-color: #2ecc71; color: white; font-weight: bold; border-radius: 5px;")
         apply_btn.clicked.connect(self.apply_selection)
         apply_layout.addWidget(apply_btn)
+
+        apply_layout.addSpacing(10)
+
+        profile_btn = QPushButton("SHOW\nPROFILE")
+        profile_btn.setFixedSize(110, 60)
+        profile_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold; border-radius: 5px; font-size: 8pt;")
+        profile_btn.clicked.connect(self.show_profile)
+        apply_layout.addWidget(profile_btn)
         
         apply_layout.addSpacing(10)
         
@@ -517,18 +585,23 @@ class BlotQuant(QMainWindow):
             "or <i>Target</i> for the protein of interest.<br><br>"
             "<b>Protein Name:</b> The label that will appear in the results and Excel export.<br><br>"
             "<b>Group:</b> Classify your selection as <i>Control</i> or <i>Treatment</i> for statistical comparison.<br><br>"
-            "<b>Group Name:</b> A detailed description (e.g. 'Ctrl', 'Insulin 10nM') for the Excel reports.<br><br>"
+            "<b>Group Name:</b> A detailed description (e.g. 'Ctrl', 'Insulin 10nM'). This dropdown saves your entries for quick selection across multiple blots.<br><br>"
             "<b>Replicates:</b> The number of lanes/bands in your current ROI selection.<br><br>"
+            "<b>Start Lane:</b> The starting index for lane numbering (e.g. if Lane 1-6 are on Blot A, set Blot B to start at #7).<br><br>"
             "<b>Equal N:</b> If checked, BlotQuant expects an equal number of Control and Treatment lanes in a single ROI (e.g. 3 Ctrl + 3 Treat).<br><br>"
             "<b>Lock ROI Size:</b> Forces any new ROI selection to have the exact same width and height as your previous selection. "
             "Essential for accurate Ponceau normalization across multiple treatments.<br><br>"
-            "<b>Welch's Test:</b> If enabled, automatically performs a Welch's T-test between Control and Treatment groups in the summary (individual values in the results can be excluded from analysis by right-clicking)."
+            "<b>Welch's Test:</b> If enabled, automatically performs a Welch's T-test between Control and Treatment groups in the summary."
         )
         QMessageBox.information(self, "Settings Help", help_msg)
 
     def show_results_help(self):
         help_msg = (
             "<h3>Results & Analysis Guide</h3>"
+            "<b>Validation (SHOW PROFILE):</b><br>"
+            "Click the blue <i>SHOW PROFILE</i> button to see the vertical intensity profile of your ROI. "
+            "Red dashed lines indicate the lane separators. Use this to ensure the lane-specific background subtraction "
+            "is accurate and not clipping signal peaks.<br><br>"
             "<b>Analysis Summary:</b><br>"
             "Shows the calculated averages for each group and the percentage change between Control and Treatment. "
             "If enabled, it also displays the P-value from a Welch's T-test.<br><br>"
@@ -537,9 +610,7 @@ class BlotQuant(QMainWindow):
             "as well as the final normalized ratio.<br><br>"
             "<b>Excluding Replicates:</b><br>"
             "Right-click any row in the detailed table to <b>Exclude from Analysis</b>. "
-            "Excluded samples are greyed out with a strike-through. They are automatically removed from "
-            "the Summary averages and P-value calculations. This is ideal for excluding unstimulated controls "
-            "or technical artifacts."
+            "Excluded samples are greyed out and automatically removed from Summary averages and P-value calculations."
         )
         QMessageBox.information(self, "Results Help", help_msg)
 
@@ -567,10 +638,10 @@ class BlotQuant(QMainWindow):
             "<b>1. Load Image:</b> Import your Western Blot (TIF, PNG, JPG).<br><br>"
             "<b>2. Align Blot:</b> Use the <i>Rotation Alignment</i> slider to ensure bands are perfectly vertical.<br><br>"
             "<b>3. Setup Analysis:</b> Enter the <i>Protein Name</i> and choose the <i>Type</i> (Loading Control or Target) and <i>Group</i> (Control or Treatment).<br><br>"
-            "<b>4. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators with even spacing.<br><br>"
-            "<b>5. Refine Lanes:</b> Drag the red separator lines to precisely align with your lanes if they are uneven.<br><br>"
-            "<b>6. Apply & View:</b> Click <i>APPLY SELECTION</i>. Analysis is now automatic—results, normalization, and statistical summaries update instantly in the right panel.<br><br>"
-            "<b>7. Exclude Samples:</b> Right-click any replicate in the results table to <i>Exclude from Analysis</i>. This is useful for poor quality bands or unstimulated controls. Statistics will update automatically."
+            "<b>4. Group History:</b> The <i>Group Name</i> field is now a dropdown that saves your entries. Quickly re-select 'Ctrl' or 'Insulin 10nM' when analyzing multiple blots from the same experiment.<br><br>"
+            "<b>5. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators.<br><br>"
+            "<b>6. Validate Profile:</b> Click <i>SHOW PROFILE</i> to see a vertical intensity plot. Ensure the background subtraction (per lane) isn't cutting off your signal peaks.<br><br>"
+            "<b>7. Apply & View:</b> Click <i>APPLY SELECTION</i>. Results, normalization, and statistical summaries update instantly in the right panel."
         )
         start_text.setWordWrap(True)
         gen_layout.addWidget(start_text)
@@ -583,12 +654,12 @@ class BlotQuant(QMainWindow):
         
         method_text = QLabel(
             "<h3>Densitometry Method</h3>"
-            "<b>Background Subtraction:</b><br>"
-            "Calculates the <i>Median Intensity</i> of the entire ROI to determine local background levels. This is more robust than single-point subtraction.<br><br>"
+            "<b>Lane-Specific Background Subtraction:</b><br>"
+            "Calculates the <i>Median Intensity</i> individually for each lane within its separator boundaries. This compensates for background gradients (e.g., darker on one side) and prevents artifacts from affecting distant bands.<br><br>"
             "<b>Signal Integration:</b><br>"
-            "Quantifies signal only from pixels exceeding a dynamic threshold (Background + 0.5 * SD). This excludes noise while capturing the full band signal.<br><br>"
-            "<b>Lane Separation:</b><br>"
-            "Supports manual lane adjustment via draggable separators, allowing for precise quantification even in irregular blots.<br><br>"
+            "Quantifies signal only from pixels exceeding a dynamic threshold (Background + 0.2 * SD). This excludes noise while capturing the full band signal.<br><br>"
+            "<b>Vertical Intensity Profile:</b><br>"
+            "Use the <i>SHOW PROFILE</i> button to visualize mean pixel intensity across the ROI width. Red dashed lines indicate lane separators, allowing you to verify that background subtraction is accurate and not clipping signal peaks.<br><br>"
             "<b>Normalization:</b><br>"
             "Automatically divides Target Protein intensities by their corresponding Loading Control (e.g., Actin) values from the same lane."
         )
@@ -792,9 +863,16 @@ class BlotQuant(QMainWindow):
         
         if rect_item or self.current_roi_rect:
             # Check if name is provided
-            if not self.protein_name_input.text().strip():
+            protein_name = self.protein_name_input.text().strip()
+            if not protein_name:
                 QMessageBox.warning(self, "Error", "Please enter a Protein/Blot Name.")
                 return
+            
+            # Save group detail to history if it's new
+            group_detail = self.treatment_detail_input.currentText().strip()
+            if group_detail and group_detail not in self.group_history:
+                self.group_history.append(group_detail)
+                self.treatment_detail_input.addItem(group_detail)
             
             # Get ROI
             if rect_item:
@@ -812,10 +890,10 @@ class BlotQuant(QMainWindow):
             self.current_roi_rect = None
             self.separators = []
 
-    def process_roi(self, roi, sep_positions=None):
+    def extract_roi_data(self, roi, sep_positions=None):
         canvas_x, canvas_y, canvas_w, canvas_h = roi
         if canvas_w <= 0 or canvas_h <= 0 or self.image is None:
-            return
+            return None, None
 
         # 1. Extraction (Rotating if needed)
         if self.rotation_angle != 0:
@@ -843,7 +921,6 @@ class BlotQuant(QMainWindow):
             
             roi_image = rotated_full[y_adj:y_adj+h_adj, x_adj:x_adj+w_adj]
             
-            # Map separator positions to full image scale
             if sep_positions:
                 scaled_seps = [int((sx - canvas_x) * scale_x) for sx in sep_positions]
             else:
@@ -863,77 +940,84 @@ class BlotQuant(QMainWindow):
                 scaled_seps = None
 
         if roi_image.size == 0:
-            return
-        
-        # 2. Processing
+            return None, None
+            
         gray_roi = cv2.cvtColor(roi_image, cv2.COLOR_BGR2GRAY)
-        
         # Ensure darker bands have HIGHER numerical values for intensity calculation
-        # Most blots are light background with dark bands.
-        # We invert the grayscale so bands become high intensity pixels.
         gray_roi = cv2.bitwise_not(gray_roi)
         
-        background = np.median(gray_roi)
-        # More sensitive thresholding for faint bands
-        threshold_val = background + (np.std(gray_roi) * 0.2)
-        _, binary = cv2.threshold(gray_roi, threshold_val, 255, cv2.THRESH_BINARY)
-        
-        # 3. Lane Separation Logic
-        intensities = []
-        if scaled_seps:
-            # Sort separators to ensure correct order
-            sorted_seps = sorted(scaled_seps)
-            # Add boundary points (0 and width)
-            boundaries = [0] + sorted_seps + [gray_roi.shape[1]]
+        return gray_roi, scaled_seps
+
+    def show_profile(self):
+        rect_item = self.graphics_view.current_rect_item
+        if not rect_item or self.image is None:
+            QMessageBox.warning(self, "Error", "Please select an ROI first.")
+            return
             
-            for i in range(len(boundaries) - 1):
-                s_x = max(0, boundaries[i])
-                e_x = min(gray_roi.shape[1], boundaries[i+1])
-                
-                if e_x <= s_x:
-                    intensities.append(0.0)
-                    continue
-                    
-                section = gray_roi[:, s_x:e_x]
-                mask = binary[:, s_x:e_x]
-                
-                signal = section.astype(np.float32) - background
-                signal[signal < 0] = 0
-                band_signal = signal[mask > 0]
-                
-                if len(band_signal) > 0:
-                    intensities.append(np.sum(band_signal))
-                else:
-                    intensities.append(0.0)
+        rect = rect_item.rect()
+        roi_tuple = (rect.x(), rect.y(), rect.width(), rect.height())
+        sep_positions = [sep.line().p1().x() for sep in self.separators]
+        
+        gray_roi, scaled_seps = self.extract_roi_data(roi_tuple, sep_positions)
+        if gray_roi is not None:
+            dialog = ProfileDialog(gray_roi, scaled_seps or [], self)
+            dialog.exec()
+
+    def process_roi(self, roi, sep_positions=None):
+        gray_roi, scaled_seps = self.extract_roi_data(roi, sep_positions)
+        if gray_roi is None:
+            return
+        
+        # 3. Lane Separation Logic with Lane-Specific Background
+        intensities = []
+        
+        # Determine boundaries
+        if scaled_seps:
+            sorted_seps = sorted(scaled_seps)
+            boundaries = [0] + sorted_seps + [gray_roi.shape[1]]
         else:
-            # Fallback to even splits if no separators provided
             replicate_count = self.reps_spin.value()
             equal_samples = self.equal_n_check.isChecked()
             num_sections = (replicate_count * 2) if equal_samples else replicate_count
-            
             section_width = gray_roi.shape[1] / num_sections
-            for i in range(num_sections):
-                s_x = int(i * section_width)
-                e_x = int((i + 1) * section_width)
+            boundaries = [int(i * section_width) for i in range(num_sections + 1)]
+
+        for i in range(len(boundaries) - 1):
+            s_x = max(0, boundaries[i])
+            e_x = min(gray_roi.shape[1], boundaries[i+1])
+            
+            if e_x <= s_x:
+                intensities.append(0.0)
+                continue
                 
-                section = gray_roi[:, s_x:e_x]
-                mask = binary[:, s_x:e_x]
-                
-                signal = section.astype(np.float32) - background
-                signal[signal < 0] = 0
-                band_signal = signal[mask > 0]
-                
-                if len(band_signal) > 0:
-                    intensities.append(np.sum(band_signal))
-                else:
-                    intensities.append(0.0)
+            section = gray_roi[:, s_x:e_x]
+            
+            # Lane-specific background (median of this lane only)
+            lane_background = np.median(section)
+            # More sensitive thresholding per lane
+            lane_threshold = lane_background + (np.std(section) * 0.2)
+            _, lane_mask = cv2.threshold(section, lane_threshold, 255, cv2.THRESH_BINARY)
+            
+            signal = section.astype(np.float32) - lane_background
+            signal[signal < 0] = 0
+            band_signal = signal[lane_mask > 0]
+            
+            if len(band_signal) > 0:
+                intensities.append(np.sum(band_signal))
+            else:
+                intensities.append(0.0)
 
         # 4. Storage and Display
         group_type = "Treatment" if self.group_treat.isChecked() else "Control"
         mode = "Loading Control" if self.mode_control.isChecked() else "Target"
         protein_name = self.protein_name_input.text().strip() or mode
-        treatment_detail = self.treatment_detail_input.text().strip() or ("None" if group_type == "Control" else "Generic Treatment")
+        treatment_detail = self.treatment_detail_input.currentText().strip() or ("None" if group_type == "Control" else "Generic Treatment")
         equal_samples = self.equal_n_check.isChecked()
+        
+        # Apply Start Index Offset
+        start_offset = self.start_idx_spin.value() - 1  # 0-indexed offset
+        if start_offset > 0:
+            intensities = [0.0] * start_offset + intensities
         
         if equal_samples:
             mid = len(intensities) // 2
@@ -1144,12 +1228,32 @@ class BlotQuant(QMainWindow):
             
         try:
             from openpyxl import Workbook
-            from openpyxl.styles import Font, Alignment
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
             
             wb = Workbook()
             ws = wb.active
             ws.title = "BlotQuant_Results"
             
+            # Global Font: Calibri
+            calibri_font = "Calibri"
+            
+            # Styling formats
+            header_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+            thin_border = Border(
+                left=Side(style='thin'), 
+                right=Side(style='thin'), 
+                top=Side(style='thin'), 
+                bottom=Side(style='thin')
+            )
+            
+            # Helper to apply border and font to a cell
+            def style_cell(cell, bold=False, italic=False, underline=None, size=11, fill=None):
+                cell.font = Font(name=calibri_font, size=size, bold=bold, italic=italic, underline=underline)
+                cell.border = thin_border
+                if fill:
+                    cell.fill = fill
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+
             # Helper to adjust column width
             def adjust_column_widths(worksheet):
                 for col in worksheet.columns:
@@ -1166,16 +1270,18 @@ class BlotQuant(QMainWindow):
 
             # 1. Header
             ws['A1'] = "Western Blot Analysis Report"
-            ws['A1'].font = Font(size=14, bold=True)
+            ws['A1'].font = Font(name=calibri_font, size=14, bold=True)
             ws['A2'] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            ws['A2'].font = Font(name=calibri_font, size=11)
             
             exp_info = self.experiment_input.text().strip()
             if exp_info:
                 ws['A3'] = f"Experiment: {exp_info}"
+                ws['A3'].font = Font(name=calibri_font, size=11)
             
             # 2. Analysis Summary Section
             ws['A5'] = "ANALYSIS SUMMARY"
-            ws['A5'].font = Font(bold=True, underline="single")
+            ws['A5'].font = Font(name=calibri_font, size=12, bold=True, underline="single")
             
             lcs = [e for e in self.analysis_history if e['type'] == 'Loading Control']
             targets = [e for e in self.analysis_history if e['type'] == 'Target']
@@ -1206,31 +1312,34 @@ class BlotQuant(QMainWindow):
                     normalized_results[t_name][target['group']] = final_vals
 
             curr_row = 7
-            ws.cell(row=curr_row, column=1, value="Target Protein").font = Font(bold=True)
-            ws.cell(row=curr_row, column=2, value="Group").font = Font(bold=True)
-            ws.cell(row=curr_row, column=3, value="Detail").font = Font(bold=True)
-            ws.cell(row=curr_row, column=4, value="Mean").font = Font(bold=True)
-            ws.cell(row=curr_row, column=5, value="SEM").font = Font(bold=True)
-            ws.cell(row=curr_row, column=6, value="N").font = Font(bold=True)
-            ws.cell(row=curr_row, column=7, value="Excluded Indices").font = Font(bold=True)
+            summary_headers = ["Target Protein", "Group", "Detail", "Mean", "SEM", "N", "Excluded Indices"]
+            for col, text in enumerate(summary_headers, 1):
+                cell = ws.cell(row=curr_row, column=col, value=text)
+                style_cell(cell, bold=True, fill=header_fill)
             curr_row += 1
 
             for target_name, groups in normalized_results.items():
                 for group_name, vals in groups.items():
                     detail = next((t['detail'] for t in targets if t['name'] == target_name and t['group'] == group_name), "")
-                    ws.cell(row=curr_row, column=1, value=target_name)
-                    ws.cell(row=curr_row, column=2, value=group_name)
-                    ws.cell(row=curr_row, column=3, value=detail)
+                    
+                    style_cell(ws.cell(row=curr_row, column=1, value=target_name))
+                    style_cell(ws.cell(row=curr_row, column=2, value=group_name))
+                    style_cell(ws.cell(row=curr_row, column=3, value=detail))
+                    
                     if vals:
-                        ws.cell(row=curr_row, column=4, value=np.mean(vals))
-                        ws.cell(row=curr_row, column=5, value=stats.sem(vals) if len(vals) > 1 else 0)
-                        ws.cell(row=curr_row, column=6, value=len(vals))
+                        style_cell(ws.cell(row=curr_row, column=4, value=np.mean(vals)))
+                        style_cell(ws.cell(row=curr_row, column=5, value=stats.sem(vals) if len(vals) > 1 else 0))
+                        style_cell(ws.cell(row=curr_row, column=6, value=len(vals)))
                     else:
-                        ws.cell(row=curr_row, column=4, value="N/A")
+                        style_cell(ws.cell(row=curr_row, column=4, value="N/A"))
+                        style_cell(ws.cell(row=curr_row, column=5, value="-"))
+                        style_cell(ws.cell(row=curr_row, column=6, value="0"))
                     
                     excluded = self.excluded_samples.get(group_name, [])
                     if excluded:
-                        ws.cell(row=curr_row, column=7, value=", ".join(str(x+1) for x in excluded))
+                        style_cell(ws.cell(row=curr_row, column=7, value=", ".join(str(x+1) for x in excluded)))
+                    else:
+                        style_cell(ws.cell(row=curr_row, column=7, value="-"))
                     curr_row += 1
                 
                 if "Control" in groups and "Treatment" in groups:
@@ -1243,21 +1352,29 @@ class BlotQuant(QMainWindow):
                         t_mean = np.mean(t_vals) if t_vals else 0
                         if c_mean != 0:
                             pct_change = ((t_mean - c_mean) / c_mean) * 100
-                            ws.cell(row=curr_row, column=1, value=f"% Change ({target_name} Ctrl vs Treat):").font = Font(italic=True)
-                            ws.cell(row=curr_row, column=2, value=f"{pct_change:+.2f}%")
+                            cell1 = ws.cell(row=curr_row, column=1, value=f"% Change ({target_name} Ctrl vs Treat):")
+                            style_cell(cell1, italic=True)
+                            cell1.alignment = Alignment(horizontal='right')
+                            
+                            cell2 = ws.cell(row=curr_row, column=2, value=f"{pct_change:+.2f}%")
+                            style_cell(cell2)
                             curr_row += 1
 
                     # T-Test
                     if len(c_vals) > 1 and len(t_vals) > 1:
                         _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=False)
-                        ws.cell(row=curr_row, column=1, value=f"P-value ({target_name} Ctrl vs Treat):").font = Font(italic=True)
-                        ws.cell(row=curr_row, column=2, value=p_val)
+                        cell1 = ws.cell(row=curr_row, column=1, value=f"P-value ({target_name} Ctrl vs Treat):")
+                        style_cell(cell1, italic=True)
+                        cell1.alignment = Alignment(horizontal='right')
+                        
+                        cell2 = ws.cell(row=curr_row, column=2, value=p_val)
+                        style_cell(cell2)
                         curr_row += 1
                 curr_row += 1 # Spacer
 
-            # 3. Detailed Data Section (Wide format: Group | ID | LC | T1 Raw | T1 Ratio | T2 Raw | T2 Ratio ...)
+            # 3. Detailed Data Section
             curr_row += 1
-            ws.cell(row=curr_row, column=1, value="DETAILED DATA (ALL TARGETS)").font = Font(bold=True, underline="single")
+            ws.cell(row=curr_row, column=1, value="DETAILED DATA (ALL TARGETS)").font = Font(name=calibri_font, size=12, bold=True, underline="single")
             curr_row += 2
             
             unique_target_names = []
@@ -1272,7 +1389,8 @@ class BlotQuant(QMainWindow):
                 headers.append(f"{t_name} (Ratio)")
             
             for col, text in enumerate(headers, 1):
-                ws.cell(row=curr_row, column=col, value=text).font = Font(bold=True)
+                cell = ws.cell(row=curr_row, column=col, value=text)
+                style_cell(cell, bold=True, fill=header_fill)
             curr_row += 1
 
             all_groups = sorted(list(set(e['group'] for e in self.analysis_history)))
@@ -1294,14 +1412,20 @@ class BlotQuant(QMainWindow):
                     id_text = f"{detail} {i+1}" if detail not in ["None", "Generic Treatment"] else f"{group} {i+1}"
                     if is_excluded: id_text += " [EXCLUDED]"
                     
-                    ws.cell(row=curr_row, column=1, value=group)
-                    ws.cell(row=curr_row, column=2, value=id_text)
+                    cell_group = ws.cell(row=curr_row, column=1, value=group)
+                    cell_id = ws.cell(row=curr_row, column=2, value=id_text)
+                    style_cell(cell_group)
+                    style_cell(cell_id)
                     
                     # LC
+                    lc_val = None
                     if group_lcs:
                         lc_entry = group_lcs[-1]
-                        val = lc_entry['intensities'][i] if i < len(lc_entry['intensities']) else None
-                        ws.cell(row=curr_row, column=3, value=val)
+                        lc_val = lc_entry['intensities'][i] if i < len(lc_entry['intensities']) else None
+                        cell_lc = ws.cell(row=curr_row, column=3, value=lc_val)
+                        style_cell(cell_lc)
+                    else:
+                        style_cell(ws.cell(row=curr_row, column=3, value="-"))
                     
                     # Targets
                     col_offset = 4
@@ -1317,20 +1441,24 @@ class BlotQuant(QMainWindow):
                             t_val = t_entry['intensities'][i] if i < len(t_entry['intensities']) else None
                             t_lc_val = t_lc_entry['intensities'][i] if t_lc_entry and i < len(t_lc_entry['intensities']) else None
                             
-                            ws.cell(row=curr_row, column=col_offset, value=t_val)
+                            cell_raw = ws.cell(row=curr_row, column=col_offset, value=t_val)
+                            style_cell(cell_raw)
+                            
                             if t_val is not None and t_lc_val is not None and t_lc_val != 0:
-                                ws.cell(row=curr_row, column=col_offset + 1, value=t_val / t_lc_val)
+                                cell_ratio = ws.cell(row=curr_row, column=col_offset + 1, value=t_val / t_lc_val)
                             else:
-                                ws.cell(row=curr_row, column=col_offset + 1, value="-")
+                                cell_ratio = ws.cell(row=curr_row, column=col_offset + 1, value="-")
+                            style_cell(cell_ratio)
                         else:
-                            ws.cell(row=curr_row, column=col_offset, value="-")
-                            ws.cell(row=curr_row, column=col_offset + 1, value="-")
+                            style_cell(ws.cell(row=curr_row, column=col_offset, value="-"))
+                            style_cell(ws.cell(row=curr_row, column=col_offset + 1, value="-"))
                         col_offset += 2
                     
                     # Style excluded rows
                     if is_excluded:
                         for col in range(1, col_offset):
-                            ws.cell(row=curr_row, column=col).font = Font(strike=True, color="7f8c8d")
+                            cell = ws.cell(row=curr_row, column=col)
+                            cell.font = Font(name=calibri_font, strike=True, color="7f8c8d")
                     
                     curr_row += 1
                 curr_row += 1 # Spacer between groups
