@@ -255,7 +255,7 @@ class BlotQuant(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
-        self.version = "1.1.0"
+        self.version = "1.1.2"
         self.creation_date = "2026-02-11"
         self.author = "Dr. Robert Hauffe"
         self.affiliation = "Molecular and Experimental Nutritional Medicine, University of Potsdam, Germany"
