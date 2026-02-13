@@ -18,7 +18,9 @@ BlotQuant is a Python-based application designed for the analysis of Western Blo
 - **Group Management:** Editable history dropdown for group names to streamline analysis of multiple blots.
 - **Normalization:** Automatically normalize target proteins against loading controls (e.g., Actin, GAPDH).
 - **Data Export:** Export comprehensive results to Excel or open data directly in GraphPad Prism.
-- **Visual Feedback:** Real-time overlay of selected regions and lane dividers.
+- **Undo & Shortcuts:** Full undo support for ROI drawing with `Ctrl+Z` shortcut.
+- **Data Import:** Reload previous datasets from Excel to reuse loading control data across multiple analyses.
+- **Visual Feedback:** Real-time overlay of selected regions and lane dividers, with an integrated "How to" guide for new users.
 
 ## Methods
 
@@ -28,21 +30,21 @@ BlotQuant employs a robust image processing pipeline to quantify protein bands:
 The application converts the input image to grayscale for intensity analysis. To ensure accurate lane separation, users can apply **Rotation Alignment** (using BICUBIC interpolation). This step is crucial for aligning bands vertically, which simplifies the subsequent lane division and prevents signal overlap between adjacent samples.
 
 ### 2. ROI Selection
-Users define a Region of Interest (ROI) that encompasses all bands of a specific protein across multiple lanes. This ROI can be dynamically resized and moved to perfectly frame the signal.
+Users define a Region of Interest (ROI) that encompasses all bands of a specific protein across multiple lanes. This ROI can be dynamically resized and moved to perfectly frame the signal. For convenience, an **Undo** function (and `Ctrl+Z`) allows users to quickly clear the last drawn ROI.
 
 ### 3. Lane Separation
 Based on the defined **Replicate Count**, the ROI is divided into equal lanes. For experiments with "Equal N" settings, the software can automatically handle paired Control and Treatment groups within a single ROI selection. Draggable separators allow for manual fine-tuning if lane spacing is irregular.
 
 ### 4. Quantification
 Once the lanes are defined, individual band intensities are calculated:
-- **Lane-Specific Background Subtraction:** Unlike global subtraction, BlotQuant calculates a unique **Median Intensity** for each lane within its specific boundaries. This is crucial for blots with background gradients (e.g., darker on one side), ensuring that a "smear" on one side doesn't artificially lower values on the other.
+- **Lane-Specific Background Subtraction:** Unlike global subtraction, BlotQuant calculates a unique **Background Intensity** for each lane using the **25th percentile** of pixels within its specific boundaries. This makes the quantification robust against tight ROI selections and addresses background gradients (e.g., darker on one side).
 - **Integrated Density:** For each lane, the software calculates the sum of `(Pixel Intensity - Background)` for all pixels above a dynamic threshold (Background + 0.2 * Standard Deviation). This sensitivity adjustment ensures accurate capture of faint bands while excluding noise.
 - **Scientific Validation:** The **Intensity Profile** tool allows researchers to visualize the mean pixel intensity across the ROI width. This "peak" view (with separator lines) ensures that background subtraction isn't clipping the protein signal.
 - **Inversion:** Automatically handles blots where bands are darker than the background (e.g., Ponceau S or Coomassie staining) by inverting pixel values for quantification.
 
 ### 5. Normalization and Statistics
-- **Normalization:** Target protein intensities are divided by their respective loading control intensities from the same lane.
-- **Statistics:** Calculates average fold change, standard error of the mean (SEM), and performs a Welch's t-test (unpaired) to determine statistical significance between Control and Treatment groups.
+- **Normalization:** Target protein intensities are divided by their respective loading control intensities from the same lane. Previous analysis results can be **Imported from Excel** to reuse loading control data for different targets.
+- **Statistics:** A dedicated **Statistics** dropdown allows users to choose between **Student's t-test**, **Welch's t-test** (unpaired), or **Two-way ANOVA** to determine statistical significance between experimental groups.
 
 ## Citation
 
@@ -75,9 +77,9 @@ To build the standalone executable from source, follow these steps:
    pyinstaller --noconfirm --onefile --windowed --icon "Blot.ico" --add-data "Blot.ico;." --name "BlotQuant" main.py
    ```
 
-## Current Build Details (2026-02-11)
-- **Version:** 1.1.2
-- **SHA-256 Checksum:** `8c8bd76ca30d8fee2b132ee50aaa1cdce74f27b351ec4b1e8dd0419cc09d128e`
+## Current Build Details (2026-02-13)
+- **Version:** 1.1.3
+- **SHA-256 Checksum:** `39E6680A6E371E3A8660251D6F65FD27ADA2C35E43469E4575079C01A7FDE1C2`
 
 To verify the integrity of your `BlotQuant.exe`, you can run the following command in PowerShell:
 ```powershell
