@@ -1,5 +1,9 @@
 import os
 import sys
+
+# Force Matplotlib to use PySide6
+os.environ["QT_API"] = "pyside6"
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -33,6 +37,7 @@ class ProfileDialog(QDialog):
         # Create figure and canvas
         self.figure = Figure(figsize=(6, 4), dpi=100)
         self.canvas = FigureCanvas(self.figure)
+        # Ensure it's treated as a QWidget
         layout.addWidget(self.canvas)
         
         self.plot_profile(roi_data, separators)
@@ -84,7 +89,7 @@ class AnalysisCanvas(QGraphicsView):
         self.sep_pen = QPen(QColor("#e74c3c"), 2)
 
     def mousePressEvent(self, event):
-        pos = self.mapToScene(event.pos())
+        pos = self.mapToScene(event.position().toPoint())
         
         # Check if clicking on a separator for dragging
         for i, sep in enumerate(self.separators):
@@ -126,7 +131,7 @@ class AnalysisCanvas(QGraphicsView):
         self.scene().addItem(self.current_rect_item)
 
     def mouseMoveEvent(self, event):
-        pos = self.mapToScene(event.pos())
+        pos = self.mapToScene(event.position().toPoint())
         
         # Priority: Dragging separator
         if self.is_dragging_sep:
@@ -244,7 +249,7 @@ class BlotQuant(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BlotQuant v1.1.2")
+        self.setWindowTitle("BlotQuant v1.1.3")
         self.resize(1600, 800)
         
         # Set Window Icon
@@ -255,8 +260,8 @@ class BlotQuant(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
-        self.version = "1.1.2"
-        self.creation_date = "2026-02-11"
+        self.version = "1.1.3"
+        self.creation_date = "2026-02-13"
         self.author = "Dr. Robert Hauffe"
         self.affiliation = "Molecular and Experimental Nutritional Medicine, University of Potsdam, Germany"
         
@@ -270,10 +275,18 @@ class BlotQuant(QMainWindow):
         self.excluded_samples = {} # {group_name: [list of excluded indices]}
         self.group_history = [] # For dropdown selection
         
+        # Undo Stack (stores previous rotation angles)
+        self.undo_stack = [] 
+        
         # Analysis Data
         self.analysis_history = [] # List of {'type': 'Loading Control'|'Target', 'group': str, 'detail': str, 'name': str, 'intensities': list}
         
         self.setup_ui()
+        
+        # Shortcuts
+        from PySide6.QtGui import QShortcut, QKeySequence
+        self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.undo_shortcut.activated.connect(self.undo_last)
         
     def setup_ui(self):
         # Main Widget
@@ -309,10 +322,13 @@ class BlotQuant(QMainWindow):
         btn_layout = QHBoxLayout()
         self.load_btn = self.create_button("Load Image", "#3498db", self.load_image)
         self.graphpad_btn = self.create_button("Open GraphPad", "#e67e22", self.open_graphpad)
-        self.undo_btn = self.create_button("Undo Last", "#f1c40f", self.undo_last)
+        self.undo_btn = self.create_button("Undo", "#f1c40f", self.undo_last)
+        self.undo_btn.setToolTip("Undo last quantification or rectangle (Ctrl+Z)")
         self.reset_btn = self.create_button("Start Over", "#e74c3c", self.start_over)
+        self.export_btn = self.create_button("Export Excel", "#27ae60", self.export_data)
+        self.import_btn = self.create_button("Import Excel", "#16a085", self.import_data)
         
-        for btn in [self.load_btn, self.graphpad_btn, self.undo_btn, self.reset_btn]:
+        for btn in [self.load_btn, self.graphpad_btn, self.undo_btn, self.reset_btn, self.export_btn, self.import_btn]:
             btn_layout.addWidget(btn)
         left_layout.addLayout(btn_layout)
         
@@ -325,7 +341,7 @@ class BlotQuant(QMainWindow):
         settings_layout = QVBoxLayout(settings_group)
         settings_layout.setAlignment(Qt.AlignLeft)  # Left align internal layout
         
-        # Add Experiment and Help Button to Group Box Header Area
+        # Add Experiment and Help Buttons to Group Box Header Area
         header_with_help = QHBoxLayout()
         header_with_help.setAlignment(Qt.AlignLeft)
         header_with_help.addWidget(QLabel("Experiment:"))
@@ -335,6 +351,24 @@ class BlotQuant(QMainWindow):
         header_with_help.addWidget(self.experiment_input)
         
         header_with_help.addSpacing(20)
+        
+        # "How to" Button
+        howto_btn = QPushButton("How to")
+        howto_btn.setFixedWidth(80)
+        howto_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        howto_btn.clicked.connect(self.show_how_to)
+        header_with_help.addWidget(howto_btn)
+        
         header_with_help.addStretch()
         
         help_btn = QPushButton("?")
@@ -421,14 +455,30 @@ class BlotQuant(QMainWindow):
         # Options Row
         options_layout = QHBoxLayout()
         options_layout.setAlignment(Qt.AlignLeft)
+        
         self.lock_roi_check = QCheckBox("Lock ROI Size")
         self.lock_roi_check.setToolTip("Forces new ROI to match the dimensions of the previous selection")
         options_layout.addWidget(self.lock_roi_check)
         
-        options_layout.addSpacing(15)
-        self.ttest_check = QCheckBox("Perform Welch's Test")
-        self.ttest_check.setChecked(True)
-        options_layout.addWidget(self.ttest_check)
+        # Lock ROI Help
+        lock_help_btn = self._create_small_help_button("Explain Lock ROI function")
+        lock_help_btn.clicked.connect(self.show_lock_roi_help)
+        options_layout.addWidget(lock_help_btn)
+        
+        options_layout.addSpacing(25)
+        
+        options_layout.addWidget(QLabel("Statistics:"))
+        self.stats_combo = QComboBox()
+        self.stats_combo.addItems(["Welch's t-test", "Student's t-test", "Two-way ANOVA"])
+        self.stats_combo.setFixedWidth(130)
+        self.stats_combo.currentIndexChanged.connect(self.refresh_analysis)
+        options_layout.addWidget(self.stats_combo)
+        
+        # Statistics Help
+        stats_help_btn = self._create_small_help_button("Guidelines on which statistic to use")
+        stats_help_btn.clicked.connect(self.show_stats_help)
+        options_layout.addWidget(stats_help_btn)
+        
         options_layout.addStretch()
         settings_layout.addLayout(options_layout)
         
@@ -483,10 +533,9 @@ class BlotQuant(QMainWindow):
         
         apply_layout.addSpacing(10)
         
-        self.export_btn = QPushButton("EXPORT\nTO EXCEL")
+        self.export_btn = self.create_button("EXPORT\nTO EXCEL", "#27ae60", self.export_data)
         self.export_btn.setFixedSize(110, 60)
         self.export_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; border-radius: 5px; font-size: 8pt;")
-        self.export_btn.clicked.connect(self.export_data)
         apply_layout.addWidget(self.export_btn)
         
         apply_layout.addStretch()
@@ -578,6 +627,57 @@ class BlotQuant(QMainWindow):
             
         self.refresh_analysis()
 
+    def _create_small_help_button(self, tooltip):
+        btn = QPushButton("?")
+        btn.setFixedSize(18, 18)
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                border-radius: 9px;
+                font-weight: bold;
+                font-size: 8pt;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+            }
+        """)
+        btn.setToolTip(tooltip)
+        return btn
+
+    def show_how_to(self):
+        help_msg = (
+            "<h3>Quick Start Guide</h3>"
+            "<b>1. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators.<br>"
+            "<i>Tip: Include enough background above and below your bands for accurate subtraction.</i><br><br>"
+            "<b>2. Adjust Lanes:</b> The red dashed lane separators are <b>draggable</b>. Adjust them to fit your lanes perfectly.<br><br>"
+            "<b>3. Validate Profile:</b> Click <i>SHOW PROFILE</i> to see a vertical intensity plot. Ensure the background subtraction (per lane) isn't cutting off your signal peaks.<br><br>"
+            "<b>4. Apply & View:</b> Click <i>QUANTIFY SELECTION</i>. Results, normalization, and statistical summaries update instantly in the right panel.<br><br>"
+            "<i>Note: Use the 'About' button for more detailed methodology information.</i>"
+        )
+        QMessageBox.information(self, "How to use BlotQuant", help_msg)
+
+    def show_lock_roi_help(self):
+        help_msg = (
+            "<h3>Lock ROI Size</h3>"
+            "When enabled, drawing a new rectangle will automatically adopt the <b>exact same width and height</b> "
+            "as the previously quantified selection.<br><br>"
+            "This is essential for ensuring that the area being quantified is identical across different blots or proteins, "
+            "which is a requirement for accurate comparative densitometry."
+        )
+        QMessageBox.information(self, "Lock ROI Help", help_msg)
+
+    def show_stats_help(self):
+        help_msg = (
+            "<h3>Statistics Guidelines</h3>"
+            "<b>Welch's t-test:</b> Use when comparing two groups (Control vs Treatment) and you cannot assume "
+            "equal variances between them. This is the safest default for biological data.<br><br>"
+            "<b>Student's t-test:</b> Use when comparing two groups and you assume they have equal variances.<br><br>"
+            "<b>Two-way ANOVA:</b> Use when your experiment has two independent factors (e.g., Treatment and Time, or Genotype and Treatment). "
+            "Note: BlotQuant currently calculates a basic interaction p-value if multiple Treatment groups are defined against a Control."
+        )
+        QMessageBox.information(self, "Statistics Help", help_msg)
+
     def show_settings_help(self):
         help_msg = (
             "<h3>Analysis Settings Guide</h3>"
@@ -637,11 +737,14 @@ class BlotQuant(QMainWindow):
             "<h3>Get Started</h3>"
             "<b>1. Load Image:</b> Import your Western Blot (TIF, PNG, JPG).<br><br>"
             "<b>2. Align Blot:</b> Use the <i>Rotation Alignment</i> slider to ensure bands are perfectly vertical.<br><br>"
-            "<b>3. Setup Analysis:</b> Enter the <i>Protein Name</i> and choose the <i>Type</i> (Loading Control or Target) and <i>Group</i> (Control or Treatment).<br><br>"
-            "<b>4. Group History:</b> The <i>Group Name</i> field is now a dropdown that saves your entries. Quickly re-select 'Ctrl' or 'Insulin 10nM' when analyzing multiple blots from the same experiment.<br><br>"
-            "<b>5. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators.<br><br>"
-            "<b>6. Validate Profile:</b> Click <i>SHOW PROFILE</i> to see a vertical intensity plot. Ensure the background subtraction (per lane) isn't cutting off your signal peaks.<br><br>"
-            "<b>7. Apply & View:</b> Click <i>APPLY SELECTION</i>. Results, normalization, and statistical summaries update instantly in the right panel."
+            "<b>3. Setup Analysis:</b> Enter the <i>Protein Name</i> and choose the <i>Type</i> (Loading Control or Target), <i>Group</i>, and <i>Statistics</i> (Student's t-test, Welch's, or Two-way ANOVA).<br><br>"
+            "<b>4. Group History:</b> The <i>Group Name</i> field is a dropdown that saves your entries for quick selection.<br><br>"
+            "<b>5. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators. Use <b>Undo</b> (or <i>Ctrl+Z</i>) to clear the last selection.<br>"
+            "<i>Note: For best results, include some background area above and below the bands.</i><br><br>"
+            "<b>6. Adjust Lanes:</b> The red dashed lane separators are <b>draggable</b>. Adjust them to fit your lanes perfectly.<br><br>"
+            "<b>7. Validate Profile:</b> Click <i>SHOW PROFILE</i> to see a vertical intensity plot. Ensure the background subtraction (per lane) isn't cutting off your signal peaks.<br><br>"
+            "<b>8. Apply & View:</b> Click <i>QUANTIFY SELECTION</i>. Results, normalization, and statistical summaries update instantly in the right panel.<br><br>"
+            "<b>9. Import/Export:</b> Use <i>EXPORT EXCEL</i> to save your data, and <i>IMPORT EXCEL</i> to reload previous data sets (e.g., to reuse loading control data)."
         )
         start_text.setWordWrap(True)
         gen_layout.addWidget(start_text)
@@ -655,13 +758,15 @@ class BlotQuant(QMainWindow):
         method_text = QLabel(
             "<h3>Densitometry Method</h3>"
             "<b>Lane-Specific Background Subtraction:</b><br>"
-            "Calculates the <i>Median Intensity</i> individually for each lane within its separator boundaries. This compensates for background gradients (e.g., darker on one side) and prevents artifacts from affecting distant bands.<br><br>"
+            "Calculates a robust <i>Background Intensity</i> individually for each lane (using the 25th percentile of pixel values). This compensates for background gradients and ensures accuracy even if the ROI is drawn tightly around the band.<br><br>"
             "<b>Signal Integration:</b><br>"
             "Quantifies signal only from pixels exceeding a dynamic threshold (Background + 0.2 * SD). This excludes noise while capturing the full band signal.<br><br>"
             "<b>Vertical Intensity Profile:</b><br>"
             "Use the <i>SHOW PROFILE</i> button to visualize mean pixel intensity across the ROI width. Red dashed lines indicate lane separators, allowing you to verify that background subtraction is accurate and not clipping signal peaks.<br><br>"
             "<b>Normalization:</b><br>"
-            "Automatically divides Target Protein intensities by their corresponding Loading Control (e.g., Actin) values from the same lane."
+            "Automatically divides Target Protein intensities by their corresponding Loading Control (e.g., Actin) values from the same lane.<br><br>"
+            "<b>Statistics:</b><br>"
+            "Choose between <i>Student's t-test</i> (equal variance), <i>Welch's t-test</i> (unequal variance), or <i>Two-way ANOVA</i> for complex experimental designs."
         )
         method_text.setWordWrap(True)
         method_layout.addWidget(method_text)
@@ -718,10 +823,19 @@ class BlotQuant(QMainWindow):
             self.display_image()
 
     def rotate_image(self, value):
+        # Only save to undo stack if value is significantly different from current
+        if abs(value - self.rotation_angle) >= 1:
+            self.undo_stack.append(self.rotation_angle)
+            # Keep stack manageable
+            if len(self.undo_stack) > 20:
+                self.undo_stack.pop(0)
+                
         self.rotation_angle = value
         self.display_image()
 
     def reset_rotation(self):
+        if self.rotation_angle != 0:
+            self.undo_stack.append(self.rotation_angle)
         self.rotation_slider.setValue(0)
         self.rotation_angle = 0
         self.display_image()
@@ -982,6 +1096,9 @@ class BlotQuant(QMainWindow):
             section_width = gray_roi.shape[1] / num_sections
             boundaries = [int(i * section_width) for i in range(num_sections + 1)]
 
+        # LOGGING/DEBUG: Print background and threshold for each lane to console
+        print(f"\n--- Quantifying: {self.protein_name_input.text()} ---")
+        
         for i in range(len(boundaries) - 1):
             s_x = max(0, boundaries[i])
             e_x = min(gray_roi.shape[1], boundaries[i+1])
@@ -992,20 +1109,24 @@ class BlotQuant(QMainWindow):
                 
             section = gray_roi[:, s_x:e_x]
             
-            # Lane-specific background (median of this lane only)
-            lane_background = np.median(section)
+            # Robust lane-specific background (25th percentile of this lane)
+            # Using 25th percentile instead of median (50th) makes the calculation 
+            # much more robust if the ROI is drawn tightly around the band.
+            lane_background = np.percentile(section, 25)
             # More sensitive thresholding per lane
-            lane_threshold = lane_background + (np.std(section) * 0.2)
+            lane_std = np.std(section)
+            lane_threshold = lane_background + (lane_std * 0.2)
+            
             _, lane_mask = cv2.threshold(section, lane_threshold, 255, cv2.THRESH_BINARY)
             
             signal = section.astype(np.float32) - lane_background
             signal[signal < 0] = 0
             band_signal = signal[lane_mask > 0]
             
-            if len(band_signal) > 0:
-                intensities.append(np.sum(band_signal))
-            else:
-                intensities.append(0.0)
+            lane_sum = np.sum(band_signal) if len(band_signal) > 0 else 0.0
+            intensities.append(lane_sum)
+            
+            print(f"Lane {i+1}: BG(P25)={lane_background:.2f}, Std={lane_std:.2f}, Thresh={lane_threshold:.2f}, SignalPixels={len(band_signal)}, Sum={lane_sum:.2f}")
 
         # 4. Storage and Display
         group_type = "Treatment" if self.group_treat.isChecked() else "Control"
@@ -1200,12 +1321,29 @@ class BlotQuant(QMainWindow):
                 pct_change = ((treat_mean - ctrl_mean) / ctrl_mean) * 100
                 summary_lines.append(f"&nbsp;&nbsp;<b>Change:</b> {pct_change:+.2f}%")
         
-        if self.ttest_check.isChecked() and "Control" in groups and "Treatment" in groups:
+        # Statistics Calculation
+        stats_mode = self.stats_combo.currentText()
+        if "Control" in groups and "Treatment" in groups:
             ctrl_vals = latest_normalized_data["Control"]
             treat_vals = latest_normalized_data["Treatment"]
             if len(ctrl_vals) > 1 and len(treat_vals) > 1:
-                _, p_val = stats.ttest_ind(ctrl_vals, treat_vals, equal_var=False)
-                summary_lines.append(f"&nbsp;&nbsp;<b>P-Value (Welch's):</b> {p_val:.4f}")
+                if stats_mode == "Welch's t-test":
+                    _, p_val = stats.ttest_ind(ctrl_vals, treat_vals, equal_var=False)
+                    summary_lines.append(f"&nbsp;&nbsp;<b>P-Value (Welch's):</b> {p_val:.4f}")
+                elif stats_mode == "Student's t-test":
+                    _, p_val = stats.ttest_ind(ctrl_vals, treat_vals, equal_var=True)
+                    summary_lines.append(f"&nbsp;&nbsp;<b>P-Value (Student's):</b> {p_val:.4f}")
+                elif stats_mode == "Two-way ANOVA":
+                    # For a simple Control vs Treatment, 2-way ANOVA isn't applicable without a second factor.
+                    # We'll stick to a placeholder or a basic comparison if more groups exist.
+                    if len(groups) > 2:
+                        # Attempt a simple 1-way ANOVA as a proxy if multiple treatments exist
+                        all_vals = [latest_normalized_data[g] for g in groups]
+                        if all(len(v) > 1 for v in all_vals):
+                            _, p_val = stats.f_oneway(*all_vals)
+                            summary_lines.append(f"&nbsp;&nbsp;<b>P-Value (1-way ANOVA):</b> {p_val:.4f}")
+                    else:
+                        summary_lines.append("&nbsp;&nbsp;<i>2-way ANOVA requires 2+ factors.</i>")
 
         self.summary_text.setText("<br>".join(summary_lines))
         
@@ -1362,8 +1500,18 @@ class BlotQuant(QMainWindow):
 
                     # T-Test
                     if len(c_vals) > 1 and len(t_vals) > 1:
-                        _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=False)
-                        cell1 = ws.cell(row=curr_row, column=1, value=f"P-value ({target_name} Ctrl vs Treat):")
+                        stats_mode = self.stats_combo.currentText()
+                        if stats_mode == "Welch's t-test":
+                            _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=False)
+                            p_label = f"P-value (Welch's {target_name}):"
+                        elif stats_mode == "Student's t-test":
+                            _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=True)
+                            p_label = f"P-value (Student's {target_name}):"
+                        else:
+                            p_val = "N/A (ANOVA not in Excel yet)"
+                            p_label = f"P-value ({target_name}):"
+
+                        cell1 = ws.cell(row=curr_row, column=1, value=p_label)
                         style_cell(cell1, italic=True)
                         cell1.alignment = Alignment(horizontal='right')
                         
@@ -1471,6 +1619,94 @@ class BlotQuant(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
 
+    def import_data(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Import Previous Results", "", "Excel Files (*.xlsx)")
+        if not file_path:
+            return
+            
+        try:
+            import pandas as pd
+            # Load the 'Detailed Data' section from Excel. 
+            # We'll look for the table starting with "Group", "Sample ID", etc.
+            # A more robust way is to read the whole sheet and find the header row.
+            df_full = pd.read_excel(file_path, sheet_name="BlotQuant_Results", header=None)
+            
+            # Find the header row for DETAILED DATA
+            header_idx = -1
+            for i, row in df_full.iterrows():
+                if row[0] == "Group" and row[1] == "Sample ID" and row[2] == "Loading Control":
+                    header_idx = i
+                    break
+            
+            if header_idx == -1:
+                QMessageBox.warning(self, "Import Error", "Could not find 'DETAILED DATA' section in the Excel file.")
+                return
+            
+            # Re-read with correct header
+            df = pd.read_excel(file_path, sheet_name="BlotQuant_Results", skiprows=header_idx)
+            
+            # Reset history if user wants, or append?
+            # User said: "so that the new analysis is written in the table right behind the existing ones"
+            # This implies appending.
+            
+            # Parse targets
+            # Columns: Group, Sample ID, Loading Control, Target1 (Raw), Target1 (Ratio), Target2 (Raw)...
+            target_cols = [c for c in df.columns if "(Raw)" in str(c)]
+            
+            imported_history = []
+            
+            # Process each group
+            for group_name in df['Group'].unique():
+                if pd.isna(group_name): continue
+                group_df = df[df['Group'] == group_name]
+                
+                # 1. Loading Control
+                lc_intensities = []
+                for val in group_df['Loading Control']:
+                    if val == "-" or pd.isna(val): lc_intensities.append(0.0)
+                    else: lc_intensities.append(float(val))
+                
+                if any(v > 0 for v in lc_intensities):
+                    imported_history.append({
+                        'type': 'Loading Control',
+                        'group': group_name,
+                        'detail': str(group_df.iloc[0]['Sample ID']).split(' ')[0], # Guessing detail from Sample ID
+                        'name': 'Imported LC',
+                        'intensities': lc_intensities
+                    })
+                
+                # 2. Targets
+                for t_col in target_cols:
+                    t_name = t_col.replace(" (Raw)", "")
+                    t_intensities = []
+                    for val in group_df[t_col]:
+                        if val == "-" or pd.isna(val): t_intensities.append(0.0)
+                        else: t_intensities.append(float(val))
+                    
+                    if any(v > 0 for v in t_intensities):
+                        imported_history.append({
+                            'type': 'Target',
+                            'group': group_name,
+                            'detail': str(group_df.iloc[0]['Sample ID']).split(' ')[0],
+                            'name': t_name,
+                            'intensities': t_intensities
+                        })
+                        
+            if imported_history:
+                self.analysis_history.extend(imported_history)
+                # Also try to import experiment name
+                exp_val = df_full.iloc[2, 0] # A3 usually
+                if isinstance(exp_val, str) and "Experiment:" in exp_val:
+                    self.experiment_input.setText(exp_val.replace("Experiment: ", ""))
+                
+                self.refresh_analysis()
+                QMessageBox.information(self, "Success", f"Imported {len(imported_history)} data entries.")
+            else:
+                QMessageBox.warning(self, "Import Warning", "No valid data found to import.")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to import: {str(e)}")
+
     def open_graphpad(self):
         import subprocess
         import os
@@ -1499,9 +1735,22 @@ class BlotQuant(QMainWindow):
                 "Please open Prism manually.")
 
     def undo_last(self):
-        if self.analysis_history:
-            self.analysis_history.pop()
-            self.refresh_analysis()
+        # Priority 1: If there's an active ROI on canvas, clear it
+        if self.graphics_view.current_rect_item:
+            self.graphics_view.clear_selection()
+            self.current_roi_rect = None
+            self.separators = []
+            return
+
+        # Priority 2: If no active ROI, undo the last rotation change
+        if self.undo_stack:
+            prev_angle = self.undo_stack.pop()
+            self.rotation_slider.blockSignals(True)
+            self.rotation_slider.setValue(int(prev_angle))
+            self.rotation_slider.blockSignals(False)
+            self.rotation_angle = prev_angle
+            self.display_image()
+            return
 
     def copy_to_clipboard(self):
         if not self.analysis_history:
@@ -1579,8 +1828,17 @@ class BlotQuant(QMainWindow):
                         pct_change = ((t_mean - c_mean) / c_mean) * 100
                         html_parts.append(f"<tr><td colspan='2'><b>% Change ({t_name}):</b></td><td colspan='3'>{pct_change:+.2f}%</td></tr>")
                 if len(c_vals) > 1 and len(t_vals) > 1:
-                    _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=False)
-                    html_parts.append(f"<tr><td colspan='2'><b>P-value ({t_name}):</b></td><td colspan='3'>{p_val:.4f}</td></tr>")
+                    stats_mode = self.stats_combo.currentText()
+                    if stats_mode == "Welch's t-test":
+                        _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=False)
+                        p_label = f"P-value (Welch's {t_name}):"
+                    elif stats_mode == "Student's t-test":
+                        _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=True)
+                        p_label = f"P-value (Student's {t_name}):"
+                    else:
+                        p_val = "N/A"
+                        p_label = f"P-value ({t_name}):"
+                    html_parts.append(f"<tr><td colspan='2'><b>{p_label}</b></td><td colspan='3'>{p_val:.4f}</td></tr>" if isinstance(p_val, float) else f"<tr><td colspan='2'><b>{p_label}</b></td><td colspan='3'>{p_val}</td></tr>")
         html_parts.append("</table><br>")
 
         html_parts.append("<h3>DETAILED DATA</h3>")
@@ -1671,8 +1929,17 @@ class BlotQuant(QMainWindow):
                         pct_change = ((t_mean - c_mean) / c_mean) * 100
                         text_parts.append(f"% Change ({t_name}):\t{pct_change:+.2f}%")
                 if len(c_vals) > 1 and len(t_vals) > 1:
-                    _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=False)
-                    text_parts.append(f"P-value ({t_name}):\t{p_val:.4f}")
+                    stats_mode = self.stats_combo.currentText()
+                    if stats_mode == "Welch's t-test":
+                        _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=False)
+                        p_label = f"P-value (Welch's {t_name}):"
+                    elif stats_mode == "Student's t-test":
+                        _, p_val = stats.ttest_ind(c_vals, t_vals, equal_var=True)
+                        p_label = f"P-value (Student's {t_name}):"
+                    else:
+                        p_val = "N/A"
+                        p_label = f"P-value ({t_name}):"
+                    text_parts.append(f"{p_label}\t{p_val:.4f}" if isinstance(p_val, float) else f"{p_label}\t{p_val}")
             text_parts.append("")
 
         text_parts.append("DETAILED DATA")
