@@ -65,21 +65,20 @@ University of Potsdam, Germany
 
 To build the standalone executable from source, follow these steps:
 
-1. **Install Dependencies:**
-   Ensure you have Python installed, then install the required packages:
-   ```bash
-   pip install PySide6 opencv-python numpy pandas pillow matplotlib scipy xlsxwriter
-   ```
+### 1. Build Environment
+- Install requirements: `pip install -r requirements.txt`
+- Install PyInstaller: `pip install pyinstaller`
 
-2. **Run PyInstaller:**
-   Use the following command to create the single-file executable (ensure `Blot.ico` is in the project root):
-   ```bash
-   pyinstaller --noconfirm --onefile --windowed --icon "Blot.ico" --add-data "Blot.ico;." --name "BlotQuant" main.py
-   ```
+### 2. Run Build
+Use the following command to create the single-file executable (ensure `BlotQuant_icon.ico` is in the project root):
+
+```bash
+pyinstaller --noconfirm --onefile --windowed --icon "BlotQuant_icon.ico" --add-data "BlotQuant_icon.ico;." --name "BlotQuant" --exclude-module "PyQt6" main.py
+```
 
 ## Current Build Details (2026-02-13)
 - **Version:** 1.1.3
-- **SHA-256 Checksum:** `39E6680A6E371E3A8660251D6F65FD27ADA2C35E43469E4575079C01A7FDE1C2`
+- **SHA-256 Checksum:** `37AAAAD3EF966E3C80B058F66756853B9784520F4A4295D61814B9B0D0FE7DC7`
 
 To verify the integrity of your `BlotQuant.exe`, you can run the following command in PowerShell:
 ```powershell
