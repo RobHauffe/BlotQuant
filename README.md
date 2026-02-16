@@ -82,7 +82,3 @@ To verify the integrity of your `BlotQuant.exe`, you can run the following comma
 ```powershell
 Get-FileHash -Path "BlotQuant.exe" -Algorithm SHA256
 ```
-
-## License
-
-This project is available for academic use.
