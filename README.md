@@ -76,7 +76,7 @@ pyinstaller --noconfirm --onefile --windowed --icon "BlotQuant_icon.ico" --add-d
 
 ## Current Build Details (2026-02-13)
 - **Version:** 1.1.3
-- **SHA-256 Checksum:** `C2250DC3DC6DF4061B9DFF82BE651A56EC6644E669091E3C628BB7EAFDB2916F`
+- **SHA-256 Checksum:** `6309EF214AFB528BBA68AB83B93B7C33AB5601D39D38F842516C4212C31EB17C`
 
 To verify the integrity of your `BlotQuant.exe`, you can run the following command in PowerShell:
 ```powershell
