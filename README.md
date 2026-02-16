@@ -51,7 +51,9 @@ Once the lanes are defined, individual band intensities are calculated:
 Users are requested to cite **Hauffe et al. 2026 (In submission)** when using BlotQuant.
 
 ## License
-This project is licensed under the MIT License – see the LICENSE file for details.
+This software is free for academic and non-commercial research use.
+Commercial use requires a separate license agreement.
+See the LICENSE file for details.
 
 ## Credits
 
