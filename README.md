@@ -59,10 +59,6 @@ See the LICENSE file for details.
 
 **Author:** Dr. Robert Hauffe
 
-**Affiliation:**
-`https://www.uni-potsdam.de/de/mem/index`  
-University of Potsdam, Germany
-
 ## Build Instructions
 
 To build the standalone executable from source, follow these steps:
