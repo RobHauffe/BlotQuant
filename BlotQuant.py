@@ -52,14 +52,34 @@ class ProfileDialog(QDialog):
         profile = np.mean(roi_data, axis=0)
         
         ax = self.figure.add_subplot(111)
+        
+        # Fill area under curve for better visualization
+        ax.fill_between(range(len(profile)), profile, color='#3498db', alpha=0.3)
         ax.plot(profile, color='#3498db', linewidth=2)
+        
         ax.set_title("Intensity Profile (Across ROI Width)")
         ax.set_xlabel("Pixel Position (X)")
-        ax.set_ylabel("Mean Intensity")
+        ax.set_ylabel("Inverted Intensity (a.u.)")
         
-        # Add separator lines
+        # Add separator lines and lane numbers
+        boundaries = [0] + separators + [len(profile)]
+        ylim = ax.get_ylim()
+        y_pos = ylim[1] - (ylim[1] - ylim[0]) * 0.05
+        
         for sep in separators:
             ax.axvline(x=sep, color='#e74c3c', linestyle='--', alpha=0.7)
+            
+        for i in range(len(boundaries) - 1):
+            start = boundaries[i]
+            end = boundaries[i+1]
+            center = (start + end) / 2
+            ax.text(center, y_pos, str(i+1), color='#c0392b', fontsize=12, 
+                    ha='center', va='top', fontweight='bold')
+            
+        # Add instruction text
+        ax.text(0.5, -0.15, "Deeper wells represent higher band intensities", 
+                transform=ax.transAxes, ha='center', va='top', 
+                style='italic', fontsize=9, color='#7f8c8d')
             
         ax.grid(True, alpha=0.3)
         self.figure.tight_layout()
@@ -144,6 +164,10 @@ class AnalysisCanvas(QGraphicsView):
             line.setP1(QPointF(new_x, rect.top()))
             line.setP2(QPointF(new_x, rect.bottom()))
             self.separators[self.active_sep].setLine(line)
+            
+            # Emit signal for real-time QC checks
+            self.separator_moved.emit(self.active_sep, new_x)
+            
             self.setCursor(Qt.ClosedHandCursor) # Visual feedback during drag
             return
 
@@ -249,24 +273,24 @@ class BlotQuant(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BlotQuant v1.1.3")
+        self.setWindowTitle("BlotQuant v1.2.0")
         self.resize(1600, 800)
         
-        # Set Window Icon
-        icon_path = "Blot.ico"
+        # Window icon
+        icon_path = "BlotQuant_icon.ico"
         if hasattr(sys, '_MEIPASS'):
-            icon_path = os.path.join(sys._MEIPASS, "Blot.ico")
+            icon_path = os.path.join(sys._MEIPASS, "BlotQuant_icon.ico")
         
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
-        self.version = "1.1.3"
-        self.creation_date = "2026-02-13"
+        self.version = "1.2.0"
+        self.creation_date = "2026-02-17"
         self.author = "Dr. Robert Hauffe"
-        self.affiliation = "Molecular and Experimental Nutritional Medicine, University of Potsdam, Germany"
         
         # Core State
         self.image = None
+        self.image_path = None
         self.display_width = 800
         self.display_height = 600
         self.rotation_angle = 0
@@ -274,9 +298,11 @@ class BlotQuant(QMainWindow):
         self.separators = []
         self.excluded_samples = {} # {group_name: [list of excluded indices]}
         self.group_history = [] # For dropdown selection
+        self.current_plot_index = -1 # Index of the currently displayed validation plot (0-based index of targets)
+        self.can_edit_last_entry = False # Flag to allow editing the name of the most recently quantified entry
         
-        # Undo Stack (stores previous rotation angles)
-        self.undo_stack = [] 
+        # Undo Stack (stores actions: {'type': 'rotation'|'quantification', 'data': val})
+        self.action_history = [] 
         
         # Analysis Data
         self.analysis_history = [] # List of {'type': 'Loading Control'|'Target', 'group': str, 'detail': str, 'name': str, 'intensities': list}
@@ -287,6 +313,9 @@ class BlotQuant(QMainWindow):
         from PySide6.QtGui import QShortcut, QKeySequence
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.undo_last)
+        
+        # Maximize on start
+        self.showMaximized()
         
     def setup_ui(self):
         # Main Widget
@@ -352,9 +381,9 @@ class BlotQuant(QMainWindow):
         
         header_with_help.addSpacing(20)
         
-        # "How to" Button
-        howto_btn = QPushButton("How to")
-        howto_btn.setFixedWidth(80)
+        # "Quick Start" Button
+        howto_btn = QPushButton("Quick Start")
+        howto_btn.setFixedWidth(100)
         howto_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3498db;
@@ -430,6 +459,7 @@ class BlotQuant(QMainWindow):
         self.treatment_detail_input.setPlaceholderText("e.g. Ctrl, Insulin 10nM, etc.")
         self.treatment_detail_input.lineEdit().setPlaceholderText("e.g. Ctrl, Insulin 10nM, etc.")
         self.treatment_detail_input.setFixedWidth(200)
+        self.treatment_detail_input.currentTextChanged.connect(self.on_group_name_changed)
         grid_settings.addWidget(self.treatment_detail_input, 1, 4)
         
         # Row 3: Replicates & Start Lane
@@ -499,12 +529,32 @@ class BlotQuant(QMainWindow):
         rotation_layout.addWidget(reset_rot_btn)
         left_layout.addLayout(rotation_layout)
         
-        # Image View Area
+        # Image View Area with Filename
         view_container = QHBoxLayout()
+        
+        # Create a vertical layout for Image + Filename
+        image_v_layout = QVBoxLayout()
+        
         self.scene = QGraphicsScene()
         self.graphics_view = AnalysisCanvas(self.scene)
         self.graphics_view.roi_selected.connect(self.on_roi_selected)
-        view_container.addWidget(self.graphics_view, stretch=4)
+        self.graphics_view.separator_moved.connect(self.on_separator_moved)
+        image_v_layout.addWidget(self.graphics_view)
+        
+        # Add filename label centered under image
+        self.filename_label = QLabel("")
+        self.filename_label.setAlignment(Qt.AlignCenter)
+        self.filename_label.setStyleSheet("color: #7f8c8d; font-style: italic; font-size: 10pt; margin-top: 5px;")
+        image_v_layout.addWidget(self.filename_label)
+        
+        # Status Label for warnings/notes
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 10pt; margin-top: 5px;")
+        image_v_layout.addWidget(self.status_label)
+        
+        # Add the vertical layout to the main horizontal container
+        view_container.addLayout(image_v_layout, stretch=4)
         
         apply_layout = QVBoxLayout()
         apply_layout.addStretch()
@@ -541,6 +591,9 @@ class BlotQuant(QMainWindow):
         apply_layout.addStretch()
         view_container.addLayout(apply_layout)
         
+        # Add filename label below image (Moved to main layout bottom)
+        # pass (removed)
+        
         left_layout.addLayout(view_container)
         
         # Right Panel (Results)
@@ -548,8 +601,26 @@ class BlotQuant(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         splitter.addWidget(right_panel)
         
+        # 1. Analysis Summary
         results_header = QHBoxLayout()
         results_header.addWidget(QLabel("Analysis Summary"))
+        
+        # Summary Navigation Buttons
+        results_header.addSpacing(20)
+        self.summary_prev_btn = QPushButton("<")
+        self.summary_prev_btn.setFixedSize(30, 20)
+        self.summary_prev_btn.clicked.connect(self.prev_plot) # Reuse plot navigation logic
+        self.summary_prev_btn.setEnabled(False)
+        self.summary_prev_btn.setToolTip("Previous Target Summary")
+        results_header.addWidget(self.summary_prev_btn)
+        
+        self.summary_next_btn = QPushButton(">")
+        self.summary_next_btn.setFixedSize(30, 20)
+        self.summary_next_btn.clicked.connect(self.next_plot) # Reuse plot navigation logic
+        self.summary_next_btn.setEnabled(False)
+        self.summary_next_btn.setToolTip("Next Target Summary")
+        results_header.addWidget(self.summary_next_btn)
+        
         results_header.addStretch()
         
         results_help_btn = QPushButton("?")
@@ -577,6 +648,7 @@ class BlotQuant(QMainWindow):
         self.summary_text.setWordWrap(True)
         right_layout.addWidget(self.summary_text)
 
+        # 2. Detailed Data Points (Moved Up)
         right_layout.addWidget(QLabel("Detailed Data Points"))
         self.results_tree = QTreeWidget()
         self.results_tree.setHeaderLabels(["Sample ID", "Loading Control", "Target", "Normalized"])
@@ -586,12 +658,60 @@ class BlotQuant(QMainWindow):
         self.results_tree.header().setStretchLastSection(False)
         self.results_tree.setHorizontalScrollMode(QTreeWidget.ScrollPerPixel)
         self.results_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        right_layout.addWidget(self.results_tree)
+        right_layout.addWidget(self.results_tree, stretch=1)
+
+        # 3. Validation Plot Header (Moved Down)
+        val_header = QHBoxLayout()
+        val_header.addWidget(QLabel("Loading Correlation and Biological Shift Plot"))
+        val_header.addStretch()
         
-        # Proportions: Left: 1, Right: 1
-        # Balanced view between image and results
+        val_help_btn = QPushButton("?")
+        val_help_btn.setFixedSize(20, 20)
+        val_help_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        val_help_btn.setToolTip("Click for plot interpretation")
+        val_help_btn.clicked.connect(self.show_normalization_help)
+        val_header.addWidget(val_help_btn)
+        
+        right_layout.addLayout(val_header)
+
+        # Validation Plot (Moved Down)
+        self.plot_figure = Figure(figsize=(4, 4), dpi=100)
+        self.plot_canvas = FigureCanvas(self.plot_figure)
+        self.plot_canvas.setMinimumHeight(350)
+        right_layout.addWidget(self.plot_canvas)
+        
+        # Navigation Buttons for Plots
+        nav_layout = QHBoxLayout()
+        nav_layout.addStretch()
+        self.plot_prev_btn = QPushButton("< Previous")
+        self.plot_prev_btn.setFixedWidth(80)
+        self.plot_prev_btn.clicked.connect(self.prev_plot)
+        self.plot_prev_btn.setEnabled(False) # Initially disabled
+        nav_layout.addWidget(self.plot_prev_btn)
+        
+        self.plot_next_btn = QPushButton("Next >")
+        self.plot_next_btn.setFixedWidth(80)
+        self.plot_next_btn.clicked.connect(self.next_plot)
+        self.plot_next_btn.setEnabled(False) # Initially disabled
+        nav_layout.addWidget(self.plot_next_btn)
+        nav_layout.addStretch()
+        right_layout.addLayout(nav_layout)
+        
+        # Proportions: Left: 1, Right: 2 (33% / 66%)
+        # More space for results, but keeps the image viewable
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 2)
 
     def create_button(self, text, color, slot):
         btn = QPushButton(text)
@@ -648,14 +768,18 @@ class BlotQuant(QMainWindow):
     def show_how_to(self):
         help_msg = (
             "<h3>Quick Start Guide</h3>"
-            "<b>1. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators.<br>"
-            "<i>Tip: Include enough background above and below your bands for accurate subtraction.</i><br><br>"
+            "<b>1. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators.<br><br>"
             "<b>2. Adjust Lanes:</b> The red dashed lane separators are <b>draggable</b>. Adjust them to fit your lanes perfectly.<br><br>"
+            "<b>Lane Selection Strategy:</b><br>"
+            "1. Height: Always maximize the vertical height of the ROI to ensure protein smears are fully captured.<br>"
+            "2. Width: Use the manual separators to create a custom 'lane' for each sample.<br>"
+            "3. The Buffer Rule: Each band should have a small amount of 'empty' space on its left and right within the separators. "
+            "If a band is very wide (e.g., due to high loading), adjust its separators accordingly, but avoid including the edge of the adjacent band.<br><br>"
             "<b>3. Validate Profile:</b> Click <i>SHOW PROFILE</i> to see a vertical intensity plot. Ensure the background subtraction (per lane) isn't cutting off your signal peaks.<br><br>"
             "<b>4. Apply & View:</b> Click <i>QUANTIFY SELECTION</i>. Results, normalization, and statistical summaries update instantly in the right panel.<br><br>"
             "<i>Note: Use the 'About' button for more detailed methodology information.</i>"
         )
-        QMessageBox.information(self, "How to use BlotQuant", help_msg)
+        QMessageBox.information(self, "Quick Start Guide", help_msg)
 
     def show_lock_roi_help(self):
         help_msg = (
@@ -694,6 +818,85 @@ class BlotQuant(QMainWindow):
             "<b>Welch's Test:</b> If enabled, automatically performs a Welch's T-test between Control and Treatment groups in the summary."
         )
         QMessageBox.information(self, "Settings Help", help_msg)
+
+    def show_normalization_help(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Loading Correlation Plot Help")
+        dialog.setMinimumSize(600, 450)
+        
+        layout = QVBoxLayout(dialog)
+        
+        tabs = QTabWidget()
+        
+        # Tab 1: General Guide
+        guide_tab = QWidget()
+        guide_layout = QVBoxLayout(guide_tab)
+        
+        guide_text = QLabel(
+                "<h3>Loading Correlation Plot Guide</h3>"
+            "This plot distinguishes between technical loading variability and actual biological changes.<br><br>"
+
+            # Centered Warning Note
+            "<div align='center' style='color: #2c3e50;'>"
+            "<b>Note: This data is explicitly before normalization - % differences do not have to match "
+            "normalized values seen in the Results table.</b>"
+            "</div><br>"
+
+            "<b>Interpretation:</b><br>"
+            "<ul>"
+            "<li><b>Control Baseline (Dashed Line):</b> The expected relationship established by the Control group.</li>"
+            "<li><b>Shift % (Biological Change):</b> The percentage increase or decrease of the Treatment group relative to the Control Baseline.</li>"
+            "<li><b>Vertical Connectors:</b> Visualizes the magnitude of the biological shift from the expected baseline.</li>"
+            "</ul>"
+
+            # Final Takeaway
+            "<div align='center' style='color: #2c3e50;'>"
+            "<p><b>Takeaway: Use this plot to confirm that your Control points follow a linear trend; a shift of your treatment group indicates a biological change, independent of loading differences.</b></p>"
+            "</div>"
+        )
+        guide_text.setWordWrap(True)
+        guide_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        guide_layout.addWidget(guide_text)
+        guide_layout.addStretch()
+        
+        tabs.addTab(guide_tab, "General Guide")
+        
+        # Tab 2: Clarification Points
+        clarify_tab = QWidget()
+        clarify_layout = QVBoxLayout(clarify_tab)
+        
+        clarify_msg = (
+            "<h3>Clarification Points</h3>"
+            "<p>To better describe the interpretation and explain the Loading Correlation Plot to others:</p>"
+            "<p><b>Establishing the Data Origin:</b><br>"
+            "The diagonal line represents the 'Loading-to-Signal' relationship established by the Control samples. "
+            "It shows us how much signal we expect to see naturally as the total protein amount increases.</p>"
+            
+            "<p><b>The Prediction:</b><br>"
+            "If the treatment had zero biological effect, the Treatment points should fall directly on that line, meaning "
+            "they only vary because of loading/pipetting differences.</p>"
+            
+            "<p><b>The Shift:</b><br>"
+            "The vertical distance from the center of the Treatment cloud to that line represents the Biological Shift. "
+            "It is the amount of signal that cannot be explained by loading alone.</p>"
+        )
+        
+        clarify_text = QLabel(clarify_msg)
+        clarify_text.setWordWrap(True)
+        clarify_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        clarify_layout.addWidget(clarify_text)
+        clarify_layout.addStretch()
+        
+        tabs.addTab(clarify_tab, "Clarification Points")
+        
+        layout.addWidget(tabs)
+        
+        # Close Button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
 
     def show_results_help(self):
         help_msg = (
@@ -741,7 +944,8 @@ class BlotQuant(QMainWindow):
             "<b>4. Group History:</b> The <i>Group Name</i> field is a dropdown that saves your entries for quick selection.<br><br>"
             "<b>5. Select ROI:</b> Draw a rectangle around your bands. BlotQuant will automatically place lane separators. Use <b>Undo</b> (or <i>Ctrl+Z</i>) to clear the last selection.<br>"
             "<i>Note: For best results, include some background area above and below the bands.</i><br><br>"
-            "<b>6. Adjust Lanes:</b> The red dashed lane separators are <b>draggable</b>. Adjust them to fit your lanes perfectly.<br><br>"
+            "<b>6. Adjust Lanes:</b> The red dashed lane separators are <b>draggable</b>. Adjust them to fit your lanes perfectly.<br>"
+            "<i>Note: The QC system will warn you if lane widths vary significantly (>20%), which might indicate selection errors.</i><br><br>"
             "<b>7. Validate Profile:</b> Click <i>SHOW PROFILE</i> to see a vertical intensity plot. Ensure the background subtraction (per lane) isn't cutting off your signal peaks.<br><br>"
             "<b>8. Apply & View:</b> Click <i>QUANTIFY SELECTION</i>. Results, normalization, and statistical summaries update instantly in the right panel.<br><br>"
             "<b>9. Import/Export:</b> Use <i>EXPORT EXCEL</i> to save your data, and <i>IMPORT EXCEL</i> to reload previous data sets (e.g., to reuse loading control data)."
@@ -765,6 +969,8 @@ class BlotQuant(QMainWindow):
             "Use the <i>SHOW PROFILE</i> button to visualize mean pixel intensity across the ROI width. Red dashed lines indicate lane separators, allowing you to verify that background subtraction is accurate and not clipping signal peaks.<br><br>"
             "<b>Normalization:</b><br>"
             "Automatically divides Target Protein intensities by their corresponding Loading Control (e.g., Actin) values from the same lane.<br><br>"
+            "<b>Loading Correlation and Biological Shift:</b><br>"
+            "A specialized plot that distinguishes between technical loading variability and true biological changes by comparing Treatment samples against the Control group's Loading-to-Signal relationship.<br><br>"
             "<b>Statistics:</b><br>"
             "Choose between <i>Student's t-test</i> (equal variance), <i>Welch's t-test</i> (unequal variance), or <i>Two-way ANOVA</i> for complex experimental designs."
         )
@@ -781,17 +987,10 @@ class BlotQuant(QMainWindow):
         info_layout.addRow("Version:", QLabel(self.version))
         info_layout.addRow("Created:", QLabel(self.creation_date))
         info_layout.addRow("Author:", QLabel(self.author))
-        
-        affiliation_label = QLabel(self.affiliation)
-        affiliation_label.setWordWrap(True)
-        info_layout.addRow("Affiliation:", affiliation_label)
-        
-        website_label = QLabel('<a href="https://www.uni-potsdam.de/de/mem/index">https://www.uni-potsdam.de/de/mem/index</a>')
-        website_label.setOpenExternalLinks(True)
-        info_layout.addRow("Website:", website_label)
+    
         
         # License Info
-        license_label = QLabel("Intended for academic use under the MIT License.")
+        license_label = QLabel("This software is free for academic and non-commercial research use. Commercial use requires a separate license agreement. See the LICENSE file for details.")
         license_label.setWordWrap(True)
         license_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         info_layout.addRow("License:", license_label)
@@ -817,6 +1016,8 @@ class BlotQuant(QMainWindow):
     def load_image(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Load Image", "", "Image files (*.png *.jpg *.tif *.tiff)")
         if file_path:
+            self.image_path = file_path
+            self.filename_label.setText(os.path.basename(file_path))
             self.image = cv2.imread(file_path)
             self.rotation_slider.setValue(0) # Reset rotation on new image
             self.rotation_angle = 0
@@ -825,17 +1026,17 @@ class BlotQuant(QMainWindow):
     def rotate_image(self, value):
         # Only save to undo stack if value is significantly different from current
         if abs(value - self.rotation_angle) >= 1:
-            self.undo_stack.append(self.rotation_angle)
+            self.action_history.append({'type': 'rotation', 'data': self.rotation_angle})
             # Keep stack manageable
-            if len(self.undo_stack) > 20:
-                self.undo_stack.pop(0)
+            if len(self.action_history) > 50:
+                self.action_history.pop(0)
                 
         self.rotation_angle = value
         self.display_image()
 
     def reset_rotation(self):
         if self.rotation_angle != 0:
-            self.undo_stack.append(self.rotation_angle)
+            self.action_history.append({'type': 'rotation', 'data': self.rotation_angle})
         self.rotation_slider.setValue(0)
         self.rotation_angle = 0
         self.display_image()
@@ -895,6 +1096,9 @@ class BlotQuant(QMainWindow):
                           self.last_roi_rect.width(), self.last_roi_rect.height())
             # Update the rectangle in the view to match the locked size
             self.graphics_view.current_rect_item.setRect(rect)
+            
+        # User started a new selection, so lock the previous entry's name
+        self.can_edit_last_entry = False
 
         self.current_roi_rect = rect
         # Only create new separators if the ROI size/position actually changed significantly
@@ -971,38 +1175,107 @@ class BlotQuant(QMainWindow):
         # Sync the AnalysisCanvas list
         self.graphics_view.separators = self.separators
 
+    def on_separator_moved(self, index, new_x):
+        # Clear any previous QC warnings
+        self.status_label.setText("")
+        
+        # We need the full set of boundaries (ROI edges + separators) to calculate widths
+        if not self.graphics_view.current_rect_item:
+            return
+            
+        rect = self.graphics_view.current_rect_item.rect()
+        left_edge = rect.left()
+        right_edge = rect.right()
+        
+        # Get current separator positions
+        # Note: The moved separator is already updated in the scene item
+        sep_positions = [sep.line().p1().x() for sep in self.separators]
+        sep_positions.sort()
+        
+        # Define all vertical boundaries of the lanes
+        boundaries = [left_edge] + sep_positions + [right_edge]
+        
+        widths = []
+        for i in range(len(boundaries) - 1):
+            width = boundaries[i+1] - boundaries[i]
+            widths.append(width)
+            
+        if not widths:
+            return
+
+        avg_width = np.mean(widths)
+        std_dev = np.std(widths)
+        
+        # QC Check: If variation is significant (>20% of mean)
+        if std_dev > (avg_width * 0.2): 
+             self.status_label.setText("Note: Lane widths vary significantly. Ensure this is due to band shape, not misalignment.")
+
+    def on_group_name_changed(self, text):
+        """
+        Updates the most recent analysis entry if it was just added.
+        Allows users to 'name' a band after clicking Quantify if they forgot.
+        """
+        if not self.analysis_history or not self.can_edit_last_entry:
+            return
+
+        text = text.strip()
+        # If text is empty, we might not want to clear it, but let's allow it for now.
+        
+        # Check the last entry
+        last_entry = self.analysis_history[-1]
+        
+        # Only update Treatment entries (Controls usually stay as 'None' detail)
+        if last_entry['group'] == 'Treatment':
+             last_entry['detail'] = text or "Generic Treatment"
+             self.refresh_analysis()
+             self.update_validation_plot()
+
     def apply_selection(self):
         # Prefer the actual item from the view, but fallback to current_roi_rect if needed
         rect_item = self.graphics_view.current_rect_item
         
-        if rect_item or self.current_roi_rect:
-            # Check if name is provided
-            protein_name = self.protein_name_input.text().strip()
-            if not protein_name:
-                QMessageBox.warning(self, "Error", "Please enter a Protein/Blot Name.")
-                return
+        # Ensure we have a valid selection
+        if not rect_item and not self.current_roi_rect:
+            QMessageBox.warning(self, "No Selection", "Please select an area on the image first.")
+            return
+
+        # Check if name is provided
+        protein_name = self.protein_name_input.text().strip()
+        if not protein_name:
+            QMessageBox.warning(self, "Error", "Please enter a Protein/Blot Name.")
+            return
+        
+        # Save group detail to history if it's new
+        group_detail = self.treatment_detail_input.currentText().strip()
+        if group_detail and group_detail not in self.group_history:
+            self.group_history.append(group_detail)
+            self.treatment_detail_input.addItem(group_detail)
+        
+        # Get ROI
+        if rect_item:
+            rect = rect_item.rect()
+        else:
+            rect = self.current_roi_rect
             
-            # Save group detail to history if it's new
-            group_detail = self.treatment_detail_input.currentText().strip()
-            if group_detail and group_detail not in self.group_history:
-                self.group_history.append(group_detail)
-                self.treatment_detail_input.addItem(group_detail)
+        roi_tuple = (rect.x(), rect.y(), rect.width(), rect.height())
+        
+        # Get manual separator positions (x-coordinates)
+        sep_positions = [sep.line().p1().x() for sep in self.separators]
+        
+        initial_history_len = len(self.analysis_history)
+        self.process_roi(roi_tuple, sep_positions)
+        
+        # Check if items were added
+        added_count = len(self.analysis_history) - initial_history_len
+        if added_count > 0:
+            self.action_history.append({'type': 'quantification', 'data': added_count})
             
-            # Get ROI
-            if rect_item:
-                rect = rect_item.rect()
-            else:
-                rect = self.current_roi_rect
-                
-            roi_tuple = (rect.x(), rect.y(), rect.width(), rect.height())
-            
-            # Get manual separator positions (x-coordinates)
-            sep_positions = [sep.line().p1().x() for sep in self.separators]
-            
-            self.process_roi(roi_tuple, sep_positions)
-            self.graphics_view.clear_selection()
-            self.current_roi_rect = None
-            self.separators = []
+        self.graphics_view.clear_selection()
+        self.current_roi_rect = None
+        self.separators = []
+        
+        # Allow editing the last entry (until next ROI selection)
+        self.can_edit_last_entry = True
 
     def extract_roi_data(self, roi, sep_positions=None):
         canvas_x, canvas_y, canvas_w, canvas_h = roi
@@ -1172,6 +1445,382 @@ class BlotQuant(QMainWindow):
             })
         
         self.refresh_analysis()
+
+    def get_all_target_names(self):
+        targets = [e for e in self.analysis_history if e['type'] == 'Target']
+        unique_names = []
+        for t in targets:
+            if t['name'] not in unique_names:
+                unique_names.append(t['name'])
+        return unique_names
+
+    def prev_plot(self):
+        unique_names = self.get_all_target_names()
+        if not unique_names: return
+        
+        # If currently at "latest" (-1), map to actual index
+        if self.current_plot_index == -1:
+            self.current_plot_index = len(unique_names) - 1
+            
+        if self.current_plot_index > 0:
+            self.current_plot_index -= 1
+            self.update_validation_plot()
+
+    def next_plot(self):
+        unique_names = self.get_all_target_names()
+        if not unique_names: return
+        
+        # If currently at "latest" (-1), map to actual index
+        if self.current_plot_index == -1:
+            self.current_plot_index = len(unique_names) - 1
+            
+        if self.current_plot_index < len(unique_names) - 1:
+            self.current_plot_index += 1
+            self.update_validation_plot()
+
+    def get_normalized_data_for_target(self, target_name):
+        """
+        Calculates normalized values for a specific target across all groups.
+        Returns: {group_name: [list of normalized values]}
+        """
+        targets = [e for e in self.analysis_history if e['type'] == 'Target' and e['name'] == target_name]
+        lcs = [e for e in self.analysis_history if e['type'] == 'Loading Control']
+        
+        normalized_data = {} # group -> list of values
+        
+        # Get all unique groups for this target
+        groups = sorted(list(set(t['group'] for t in targets)))
+        
+        for group in groups:
+            group_targets = [t for t in targets if t['group'] == group]
+            group_lcs = [l for l in lcs if l['group'] == group]
+            
+            if not group_targets:
+                continue
+                
+            normalized_data[group] = []
+            
+            # We need to process by replicate index across all entries for this group
+            # Find max length
+            max_reps = 0
+            for e in group_targets + group_lcs:
+                max_reps = max(max_reps, len(e['intensities']))
+                
+            for i in range(max_reps):
+                # Check exclusion
+                if i in self.excluded_samples.get(group, []):
+                    continue
+                    
+                # Get Target Value
+                # Find the target entry that covers this replicate index
+                # (Assuming entries are sequential or we just take the last one that has it? 
+                # Actually, replicates are usually in one entry or split across entries. 
+                # The logic in refresh_analysis iterates replicates 0..max and finds the entry.)
+                
+                # Simplified approach matching refresh_analysis:
+                # Iterate through target entries for this group
+                t_val = 0
+                t_entry_found = None
+                
+                # Find the target entry for this replicate index (i)
+                # In BlotQuant, usually one entry has multiple replicates. 
+                # If multiple entries exist for same group (e.g. added later), we usually treat them as cumulative?
+                # The refresh_analysis logic takes the LAST target entry for the group. 
+                # "group_targets[-1]" at line 1612.
+                # So we should do the same.
+                
+                t_entry = group_targets[-1]
+                if i < len(t_entry['intensities']):
+                    t_val = t_entry['intensities'][i]
+                    t_entry_found = t_entry
+                
+                if not t_entry_found or t_val == 0:
+                    continue
+                    
+                # Find LC
+                # Logic from refresh_analysis:
+                target_in_history_idx = self.analysis_history.index(t_entry_found)
+                applicable_lcs = [e for idx, e in enumerate(self.analysis_history) 
+                                 if idx < target_in_history_idx and e['type'] == 'Loading Control' and e['group'] == group]
+                t_lc_entry = applicable_lcs[-1] if applicable_lcs else (group_lcs[-1] if group_lcs else None)
+                
+                lc_val = 0
+                if t_lc_entry and i < len(t_lc_entry['intensities']):
+                    lc_val = t_lc_entry['intensities'][i]
+                    
+                if lc_val > 0:
+                    norm = t_val / lc_val
+                    normalized_data[group].append(norm)
+                    
+        return normalized_data
+
+    def update_summary_text(self, target_name):
+        """Updates the Analysis Summary text box for a specific target."""
+        if not target_name:
+            self.summary_text.setText("No target selected.")
+            return
+
+        normalized_data = self.get_normalized_data_for_target(target_name)
+        
+        if not normalized_data:
+             self.summary_text.setText(f"No valid data for {target_name}.")
+             return
+
+        summary_lines = []
+        summary_lines.append(f"<b>Results for: {target_name}</b>")
+        
+        group_means = {g: np.mean(v) for g, v in normalized_data.items() if v}
+        for g, m in group_means.items():
+            summary_lines.append(f"&nbsp;&nbsp;{g} Average: {m:.4f}")
+        
+        groups = list(normalized_data.keys())
+        # Prioritize Control vs Treatment logic
+        ctrl_keys = [g for g in groups if g in ['Control', 'Ctrl']]
+        treat_keys = [g for g in groups if g not in ['Control', 'Ctrl']]
+        
+        if ctrl_keys and treat_keys:
+            # Use the first found control and first treatment for simple stats
+            # (Or expand to handle multiple treatments)
+            ctrl_grp = ctrl_keys[0]
+            
+            # Change %
+            ctrl_mean = group_means.get(ctrl_grp, 0)
+            if ctrl_mean != 0:
+                for t_grp in treat_keys:
+                     treat_mean = group_means.get(t_grp, 0)
+                     pct_change = ((treat_mean - ctrl_mean) / ctrl_mean) * 100
+                     summary_lines.append(f"&nbsp;&nbsp;<b>Change ({t_grp}):</b> {pct_change:+.2f}%")
+        
+            # Statistics
+            stats_mode = self.stats_combo.currentText()
+            ctrl_vals = normalized_data[ctrl_grp]
+            
+            # Simple pairwise t-tests against Control for all treatments
+            if len(ctrl_vals) > 1:
+                for t_grp in treat_keys:
+                    treat_vals = normalized_data[t_grp]
+                    if len(treat_vals) > 1:
+                        if stats_mode == "Welch's t-test":
+                            _, p_val = stats.ttest_ind(ctrl_vals, treat_vals, equal_var=False)
+                            summary_lines.append(f"&nbsp;&nbsp;<b>P-Value ({t_grp}, Welch's):</b> {p_val:.4f}")
+                        elif stats_mode == "Student's t-test":
+                            _, p_val = stats.ttest_ind(ctrl_vals, treat_vals, equal_var=True)
+                            summary_lines.append(f"&nbsp;&nbsp;<b>P-Value ({t_grp}, Student's):</b> {p_val:.4f}")
+                        elif stats_mode == "Two-way ANOVA":
+                            # Placeholder logic matching previous implementation
+                            if len(groups) > 2:
+                                all_vals = [normalized_data[g] for g in groups if len(normalized_data[g]) > 1]
+                                if len(all_vals) >= 2:
+                                    _, p_val = stats.f_oneway(*all_vals)
+                                    summary_lines.append(f"&nbsp;&nbsp;<b>P-Value (1-way ANOVA):</b> {p_val:.4f}")
+                            else:
+                                 summary_lines.append("&nbsp;&nbsp;<i>2-way ANOVA requires 2+ factors.</i>")
+                                 break # Show once
+
+        self.summary_text.setText("<br>".join(summary_lines))
+
+    def get_filtered_data(self, group, target_entry):
+        """Helper to get valid X (LC) and Y (Target) values for a specific target entry, excluding flagged samples."""
+        # Find the index of this target entry
+        if target_entry not in self.analysis_history:
+            return [], []
+            
+        t_idx = self.analysis_history.index(target_entry)
+        
+        # Find the most recent LC for this group *before* this target
+        applicable_lcs = [e for idx, e in enumerate(self.analysis_history) 
+                         if idx < t_idx and e['type'] == 'Loading Control' and e['group'] == group]
+        
+        if not applicable_lcs:
+            return [], []
+            
+        lc_entry = applicable_lcs[-1]
+        
+        # Get excluded indices
+        excluded = self.excluded_samples.get(group, [])
+        
+        x_vals, y_vals = [], []
+        min_len = min(len(lc_entry['intensities']), len(target_entry['intensities']))
+        
+        for i in range(min_len):
+            if i in excluded:
+                continue
+            
+            lx = lc_entry['intensities'][i]
+            ty = target_entry['intensities'][i]
+            
+            if lx > 0 and ty > 0:
+                x_vals.append(lx)
+                y_vals.append(ty)
+                
+        return x_vals, y_vals
+
+    def update_validation_plot(self):
+        self.plot_figure.clear()
+        
+        # Get all targets
+        targets = [e for e in self.analysis_history if e['type'] == 'Target']
+        
+        ax = self.plot_figure.add_subplot(111)
+
+        if not targets:
+            ax.text(0.5, 0.5, "Quantify Loading Control + Target\nto see Loading Correlation Plot.", 
+                    ha='center', va='center', transform=ax.transAxes)
+            self.plot_canvas.draw()
+            self.plot_prev_btn.setEnabled(False)
+            self.plot_next_btn.setEnabled(False)
+            if hasattr(self, 'summary_prev_btn'):
+                self.summary_prev_btn.setEnabled(False)
+                self.summary_next_btn.setEnabled(False)
+            self.summary_text.setText("Analyze both Loading Control and Target to see results.")
+            return
+            
+        # Determine which target to plot
+        unique_names = self.get_all_target_names()
+        
+        # Validate index
+        if self.current_plot_index == -1:
+             target_name_to_plot = unique_names[-1]
+             display_index = len(unique_names) - 1
+        else:
+             if 0 <= self.current_plot_index < len(unique_names):
+                 target_name_to_plot = unique_names[self.current_plot_index]
+                 display_index = self.current_plot_index
+             else:
+                 target_name_to_plot = unique_names[-1]
+                 display_index = len(unique_names) - 1
+        
+        # Update Button States
+        can_prev = display_index > 0
+        can_next = display_index < len(unique_names) - 1
+        
+        self.plot_prev_btn.setEnabled(can_prev)
+        self.plot_next_btn.setEnabled(can_next)
+        
+        # Sync Summary Navigation Buttons
+        if hasattr(self, 'summary_prev_btn'):
+            self.summary_prev_btn.setEnabled(can_prev)
+            self.summary_next_btn.setEnabled(can_next)
+            
+        # Update Summary Text to match the plot
+        self.update_summary_text(target_name_to_plot)
+        
+        colors = {'Control': '#3498db', 'Treatment': '#e74c3c'}
+        default_color = '#95a5a6' # Gray for unknown groups
+        
+        # 1. Identify Subgroups (Group Type + Detail)
+        # Get all targets for this protein
+        relevant_targets = [t for t in targets if t['name'] == target_name_to_plot]
+        
+        # Collect unique subgroups: (group_type, detail_name)
+        # We use a dictionary to preserve order of appearance while ensuring uniqueness
+        subgroups_map = {} 
+        for t in relevant_targets:
+            key = (t['group'], t['detail'])
+            if key not in subgroups_map:
+                subgroups_map[key] = []
+            subgroups_map[key].append(t)
+            
+        # Organize for plotting: Control first, then Treatments
+        sorted_keys = sorted(subgroups_map.keys(), key=lambda x: (0 if x[0] in ['Control', 'Ctrl'] else 1, x[1]))
+        
+        # 1b. Establish Control Baseline for THIS Target (using its specific Control data)
+        ctrl_slope = None
+        ctrl_intercept = None
+        
+        target_ctrl_x = []
+        target_ctrl_y = []
+        
+        for (g_type, g_detail), entries in subgroups_map.items():
+            if g_type in ['Control', 'Ctrl']:
+                for t_entry in entries:
+                    cx, cy = self.get_filtered_data(g_type, t_entry)
+                    target_ctrl_x.extend(cx)
+                    target_ctrl_y.extend(cy)
+                    
+        if len(target_ctrl_x) > 1:
+             slope, intercept, _, _, _ = stats.linregress(target_ctrl_x, target_ctrl_y)
+             ctrl_slope, ctrl_intercept = slope, intercept
+             
+             # Draw Baseline Line (extend slightly)
+             max_x = max(target_ctrl_x) * 1.3
+             line_x = np.array([0, max_x])
+             ax.plot(line_x, slope * line_x + intercept, color=colors.get('Control', default_color), 
+                     linestyle='--', alpha=0.5, label="Loading Baseline")
+
+        # 2. Process Each Subgroup
+        for (g_type, g_detail) in sorted_keys:
+            entries = subgroups_map[(g_type, g_detail)]
+            
+            # Aggregate data for this subgroup
+            sub_x = []
+            sub_y = []
+            for t_entry in entries:
+                sx, sy = self.get_filtered_data(g_type, t_entry)
+                sub_x.extend(sx)
+                sub_y.extend(sy)
+            
+            if not sub_x:
+                continue
+                
+            # Determine Label
+            if g_detail and g_detail not in ["None", "Generic Treatment", ""]:
+                label = g_detail
+            else:
+                label = g_type
+                
+            color = colors.get(g_type, default_color)
+            
+            # If this is a Control Group
+            if g_type in ['Control', 'Ctrl']:
+                ax.scatter(sub_x, sub_y, color=color, label=label, s=50, alpha=0.7)
+                           
+            # If this is a Treatment Group (or other)
+            elif ctrl_slope is not None:
+                # Calculate Centroid
+                mean_x, mean_y = np.mean(sub_x), np.mean(sub_y)
+                
+                # Calculate Expected Y on Control Baseline
+                expected_y = ctrl_slope * mean_x + ctrl_intercept
+                
+                # Calculate Shift %
+                if expected_y != 0:
+                    shift_ratio = mean_y / expected_y
+                    shift_pct = (shift_ratio - 1) * 100
+                else:
+                    shift_pct = 0
+                
+                # Draw Shift Connector (Vertical dashed line)
+                ax.plot([mean_x, mean_x], [expected_y, mean_y], color='black', 
+                        linestyle=':', linewidth=1.5, marker='_')
+                
+                # Add Shift Label
+                ax.text(mean_x * 1.05, (expected_y + mean_y)/2, f"{shift_pct:+.1f}% shift\n(before norm)", 
+                        fontsize=8, fontweight='bold', color='#2c3e50')
+                
+                # Plot Points
+                ax.scatter(sub_x, sub_y, color=color, label=label, s=50, alpha=0.7)
+            else:
+                # Fallback if no baseline established yet
+                ax.scatter(sub_x, sub_y, color=color, label=label, s=50, alpha=0.7)
+
+
+        # Calculate Total Pearson r - REMOVED per user request
+        # (Logic removed)
+
+        # 3. Finalize Plot Layout
+        ax.set_title(f"Loading Correlation Plot: {target_name_to_plot}", fontsize=10)
+        ax.legend(fontsize=8, loc='upper left')
+        ax.set_xlabel("Raw Loading Control")
+        ax.set_ylabel(f"Raw {target_name_to_plot}")
+        
+        # Add Help Text (Updated)
+        help_text = ("Shift %: Biological change relative to Control Line")
+        ax.text(0.98, 0.02, help_text, transform=ax.transAxes, fontsize=7, 
+                verticalalignment='bottom', horizontalalignment='right', 
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+                
+        self.plot_canvas.draw()
 
     def refresh_analysis(self):
         self.results_tree.clear()
@@ -1350,6 +1999,8 @@ class BlotQuant(QMainWindow):
         # Resize columns to contents for better readability
         for i in range(self.results_tree.columnCount()):
             self.results_tree.resizeColumnToContents(i)
+
+        self.update_validation_plot()
 
     def analyze_blot(self):
         """Redundant: analysis now happens automatically in refresh_analysis."""
@@ -1612,7 +2263,61 @@ class BlotQuant(QMainWindow):
                 curr_row += 1 # Spacer between groups
             
             adjust_column_widths(ws)
+            # 3. Data Validation Sheet
+            temp_files = []
+            try:
+                ws_val = wb.create_sheet("Data Validation")
+                
+                # Get all unique target names to iterate through plots
+                unique_names = self.get_all_target_names()
+                
+                # Save current state to restore later
+                original_plot_index = self.current_plot_index
+                
+                import tempfile
+                from openpyxl.drawing.image import Image as XLImage
+                
+                current_row = 1
+                
+                for idx, t_name in enumerate(unique_names):
+                    # Set title for this plot
+                    cell = ws_val.cell(row=current_row, column=1, value=f"Loading Correlation and Biological Shift Plot: {t_name}")
+                    cell.font = Font(name='Calibri', size=14, bold=True)
+                    
+                    # Update plot to this target
+                    self.current_plot_index = idx
+                    self.update_validation_plot() 
+                    
+                    # Save to temp file
+                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                        self.plot_figure.savefig(tmp.name, dpi=100, bbox_inches='tight')
+                        temp_files.append(tmp.name)
+                        
+                        img = XLImage(tmp.name)
+                        ws_val.add_image(img, f'A{current_row+2}')
+                    
+                    # Advance row for next plot
+                    current_row += 25 
+                
+                # Restore original state
+                self.current_plot_index = original_plot_index
+                self.update_validation_plot()
+                
+            except Exception as e:
+                print(f"Validation plot export failed: {e}")
+                if 'original_plot_index' in locals():
+                    self.current_plot_index = original_plot_index
+                    self.update_validation_plot()
+
             wb.save(file_path)
+            
+            # Cleanup temp files
+            for tmp_path in temp_files:
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+
             QMessageBox.information(self, "Success", f"Data exported to {file_path}")
             import os
             os.startfile(file_path)
@@ -1742,15 +2447,38 @@ class BlotQuant(QMainWindow):
             self.separators = []
             return
 
-        # Priority 2: If no active ROI, undo the last rotation change
-        if self.undo_stack:
-            prev_angle = self.undo_stack.pop()
-            self.rotation_slider.blockSignals(True)
-            self.rotation_slider.setValue(int(prev_angle))
-            self.rotation_slider.blockSignals(False)
-            self.rotation_angle = prev_angle
-            self.display_image()
+        # Priority 2: Use unified action history
+        if self.action_history:
+            last_action = self.action_history.pop()
+            
+            if last_action['type'] == 'rotation':
+                prev_angle = last_action['data']
+                self.rotation_slider.blockSignals(True)
+                self.rotation_slider.setValue(int(prev_angle))
+                self.rotation_slider.blockSignals(False)
+                self.rotation_angle = prev_angle
+                self.display_image()
+                
+            elif last_action['type'] == 'quantification':
+                count = last_action['data']
+                # Remove the last 'count' items from analysis_history
+                if len(self.analysis_history) >= count:
+                    for _ in range(count):
+                        self.analysis_history.pop()
+                    self.refresh_analysis()
+                    self.update_validation_plot()
+                    self.can_edit_last_entry = False # Reset edit flag on undo
+                    QMessageBox.information(self, "Undo", f"Undid last quantification ({count} entries removed).")
             return
+
+        # Legacy/Fallback (if using old undo stack for some reason)
+        if hasattr(self, 'undo_stack') and self.undo_stack:
+             prev_angle = self.undo_stack.pop()
+             self.rotation_slider.blockSignals(True)
+             self.rotation_slider.setValue(int(prev_angle))
+             self.rotation_slider.blockSignals(False)
+             self.rotation_angle = prev_angle
+             self.display_image()
 
     def copy_to_clipboard(self):
         if not self.analysis_history:
@@ -2006,6 +2734,13 @@ class BlotQuant(QMainWindow):
             self.separators = []
             self.experiment_input.clear()
             self.summary_text.setText("No analysis performed yet.")
+            
+            # Reset Plot State
+            self.current_plot_index = -1
+            self.plot_figure.clear()
+            self.plot_canvas.draw()
+            self.plot_prev_btn.setEnabled(False)
+            self.plot_next_btn.setEnabled(False)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
